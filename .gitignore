@@ -1,0 +1,9 @@
+.eggs
+*.egg-info
+build/
+dist/
+wheel/
+__pycache__/
+mcurllib/
+*.h
+*.pem
