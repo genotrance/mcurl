@@ -12,10 +12,10 @@ proxy server which uses libcurl to handle upstream proxy authentication.
 mcurl can be installed using pip:
 
 ```bash
-pip install mcurl
+pip install pymcurl
 ```
 
-Binary [packages](https://pypi.org/project/mcurl) are provided the following platforms:
+Binary [packages](https://pypi.org/project/pymcurl) are provided the following platforms:
 - aarch64-linux-gnu
 - aarch64-linux-musl
 - i686-linux-gnu

@@ -17,8 +17,9 @@ if [ "$OS" = "darwin" ]; then
     #export DYLD_LIBRARY_PATH="`pwd`/mcurllib/$KEY"
 elif [ "$OS" = "linux" ]; then
     OS="linux"
-    LIBC=`python3 -c "import platform; print(platform.libc_ver()[0])"`
-    if [ -z "$LIBC" ]; then
+    if [ -z `ldd /bin/ls | grep musl` ]; then
+        LIBC="glibc"
+    else
         LIBC="musl"
     fi
     KEY="$ARCH-$OS-$LIBC"
@@ -41,18 +42,19 @@ if [ -f "/.dockerenv" ] || [ "$OS" = "macos" ] || [ "$OS" = "windows" ]; then
 
     # Build wheel if not exists or --force
     if [ ! -d "wheel/$KEY" ] || [ "$1" = "--force" ]; then
-        rm -rf build mcurl.egg-info dist wheel/$KEY
+        rm -rf build pymcurl.egg-info dist wheel/$KEY
 
         python3 -m pip install build
         if [ "$OS" = "windows" ]; then
             python3 -m build -w . -C="--build-option=build" -C="--build-option=--compiler" -C="--build-option=mingw32" -C="--build-option=bdist_wheel" -C="--build-option=--py-limited-api" -C="--build-option=cp32"
+            read -s -n 1 -r -p "Rerun 'gcc -shared' with -lpython3, copy _libcurl_cffi.pyd to wheel and press Enter"
         else
             python3 -m build -w . -C="--build-option=bdist_wheel" -C="--build-option=--py-limited-api" -C="--build-option=cp32"
         fi
 
         if [ "$OS" = "linux" ]; then
             python3 -m pip install auditwheel
-            python3 -m auditwheel repair -w wheel/$KEY dist/*.whl
+            LD_LIBRARY_PATH="`pwd`/mcurllib/$KEY" python3 -m auditwheel repair -w wheel/$KEY dist/*.whl
         elif [ "$OS" = "windows" ]; then
             python3 -m pip install delvewheel
             python3 -m delvewheel repair --add-path mcurllib/$KEY -w wheel/$KEY dist/*.whl
@@ -67,13 +69,13 @@ if [ -f "/.dockerenv" ] || [ "$OS" = "macos" ] || [ "$OS" = "windows" ]; then
     test() {
         $1 -V
 
-        $1 -m pip install wheel/$KEY/mcurl-*.whl --force-reinstall
+        $1 -m pip install wheel/$KEY/pymcurl-*.whl --force-reinstall
 
         cd tests
         $1 test.py $HTTPBIN
         cd ..
 
-        $1 -m pip uninstall mcurl -y
+        $1 -m pip uninstall pymcurl -y
     }
 
     for py in $PYTHON; do

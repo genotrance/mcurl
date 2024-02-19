@@ -3,8 +3,8 @@ build-backend = "setuptools.build_meta"
 requires = ["cffi", "jbb", "setuptools", "wheel"]
 
 [project]
-name = "mcurl"
-version = "8.6.0.0"
+name = "pymcurl"
+version = "8.6.0.1"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
