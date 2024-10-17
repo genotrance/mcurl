@@ -19,7 +19,7 @@ def dprint(msg):
             break
     sys.stdout.write(str(int(time.time())) + ": " + tree + ": " + msg + "\n")
 
-def query(url, method="GET", data = None, quit=True, check=False, insecure=False, multi=None):
+def query(url, method="GET", data = None, quit=True, check=False, insecure=False, multi=None, encoding="utf-8"):
     ec = mcurl.Curl(url, method)
     if url.startswith("https"):
         ec.set_insecure(insecure)
@@ -39,7 +39,7 @@ def query(url, method="GET", data = None, quit=True, check=False, insecure=False
         print(f"Failed with error {ret}\n{ec.errstr}")
         sys.exit(1)
     else:
-        ret_data = ec.get_data()
+        ret_data = ec.get_data(encoding=encoding)
         print(f"\n{ec.get_headers()}Response length: {len(ret_data)}")
         if check:
             # Tests against httpbin
@@ -67,12 +67,19 @@ def queryall(testurl):
     else:
         query(testurl, quit=True)
 
+    # HTTP verb tests
     for method in ["GET", "POST", "PUT", "DELETE", "PATCH"]:
         for protocol in ["http", "https"]:
             testurl = protocol + url + method.lower()
             data = str(uuid.uuid4()) if method in ["POST", "PUT", "PATCH"] else None
             query(testurl, method, data, quit=False, check=True, insecure=insecure)
             query(testurl, method, data, quit=False, check=True, insecure=insecure, multi=multi)
+
+    # Binary download tests
+    for protocol in ["http", "https"]:
+        testurl = protocol + url + "image/jpeg"
+        query(testurl, quit=False, insecure=insecure, encoding=None)
+        query(testurl, quit=False, insecure=insecure, multi=multi, encoding=None)
 
     sys.exit()
 

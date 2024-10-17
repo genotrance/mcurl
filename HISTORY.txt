@@ -1,0 +1,8 @@
+v8.9.1.0 - 2024-10-16
+- Update to libcurl v8.9.1
+- Fixed bug which was causing an error when downloading binary data
+- Fixed bug reported in genotrance/Px:214 - accessing uninitialized
+  headers
+
+v8.6.0.1 - 2024-02-19
+- Initial release

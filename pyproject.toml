@@ -4,7 +4,7 @@ requires = ["cffi", "jbb", "setuptools", "wheel"]
 
 [project]
 name = "pymcurl"
-version = "8.6.0.1"
+version = "8.9.1.0"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -42,3 +42,9 @@ Issues = "https://github.com/genotrance/mcurl/issues"
 [tool.setuptools]
 packages = ["mcurl"]
 include-package-data = true
+
+[tool.tox]
+envlist = ["py37", "py38", "py39", "py310", "py311", "py312", "py313"]
+
+[tool.tox.env_run_base]
+commands = [["python", "tests/test.py", "{env:HTTPBIN}"]]

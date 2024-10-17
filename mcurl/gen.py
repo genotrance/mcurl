@@ -25,9 +25,9 @@ typedef struct {
     long %s int fds_bits[%d];
 } fd_set;
 """ % (
-    "unsigned" if jbb.get_libc() == "musl" else "",
-    16 if sys.maxsize > 2**32 else 32
-)
+        "unsigned" if jbb.get_libc() == "musl" else "",
+        16 if sys.maxsize > 2**32 else 32
+    )
 
     HEADER = """
 #include <sys/socket.h>
@@ -94,6 +94,7 @@ FILTERS = [
 
 DEFINES = {}
 
+
 def code_cleanup(code):
     # Align code
     defines = ""
@@ -147,7 +148,7 @@ def code_cleanup(code):
                     spl[2] = spl[2].replace("(unsigned long)", "")
 
                 if spl[2] in DEFINES:
-                    #define CURL_YYY CURL_XXX
+                    # define CURL_YYY CURL_XXX
                     val = DEFINES[spl[2]]
                 else:
                     if "CURL" in spl[2]:
@@ -181,17 +182,20 @@ def code_cleanup(code):
 
     return codeout2
 
+
 def gen_callbacks(code):
     # Generate cffi callback definitions for the CDEF from the processed code
     callbacks = ""
     for line in code.splitlines():
         if line.startswith("typedef") and "(*" in line and "_callback" in line:
             callbacks += (line.replace("typedef", "extern \"Python\"")
-                .replace("(*curl_", "", 1).replace("(*_curl", "").replace(")", "", 1) + "\n")
+                          .replace("(*curl_", "", 1).replace("(*_curl", "")
+                          .replace(")", "", 1) + "\n")
 
     return callbacks
 
-def get_preprocessor(sfile, incs = [], defines = [], recurse = False):
+
+def get_preprocessor(sfile, incs=[], defines=[], recurse=False):
     # Get preprocessed output from the C/C++ compiler
     args = ["gcc"]
     start = False
@@ -206,18 +210,20 @@ def get_preprocessor(sfile, incs = [], defines = [], recurse = False):
     # Add include directories to args
     for inc in incs:
         args.append(f"-I{inc}")
-        includeDirs.append(inc.absolutePath().sanitizePath(noQuote = True))
+        includeDirs.append(inc.absolutePath().sanitizePath(noQuote=True))
 
     # Add #define values if needed
     for hdef in defines:
         args.append(f"-D{hdef}")
 
     # Remove gcc special calls
-    args.extend(['"-D__attribute__(x)="', "-D__restrict=", "-D__restrict__=", "-D__extension__=", "-D__inline__=inline",
-        "-D__inline=inline", "-D_Noreturn=", f"{sfile}"])
+    args.extend(['"-D__attribute__(x)="', "-D__restrict=",
+                 "-D__restrict__=", "-D__extension__=", "-D__inline__=inline",
+                 "-D__inline=inline", "-D_Noreturn=", f"{sfile}"])
 
     # Run preprocessor
-    p = subprocess.run(" ".join(args), capture_output=True, text=True, shell=True)
+    p = subprocess.run(" ".join(args), capture_output=True,
+                       text=True, shell=True)
     outp = p.stdout.replace("\\\\", os.sep).splitlines()
     if len(p.stderr) != 0:
         print(p.stderr)
@@ -243,8 +249,8 @@ def get_preprocessor(sfile, incs = [], defines = [], recurse = False):
                             if start:
                                 break
         elif ": fatal error:" in line:
-            raise Exception("Failed in preprocessing, check if `incs` is needed or compiler `mode` is correct (c/cpp)" + \
-                "\n\nERROR:" + line.split(": fatal error:")[1])
+            raise Exception("Failed in preprocessing, check if `incs` is needed or compiler `mode` is correct (c/cpp)" +
+                            "\n\nERROR:" + line.split(": fatal error:")[1])
         else:
             if start:
                 if "#undef" in line:
@@ -265,6 +271,7 @@ def get_preprocessor(sfile, incs = [], defines = [], recurse = False):
 
     return code
 
+
 def get_libcurl_version():
     # Get module version from pyproject.toml
     with open("pyproject.toml", "r") as f:
@@ -280,6 +287,7 @@ def get_libcurl_version():
     lastdot = version.rfind(".")
     return version[:lastdot]
 
+
 def cffi_prep(cdef, inc, libs):
     # Build with cffi
     ffibuilder = cffi.FFI()
@@ -289,23 +297,24 @@ def cffi_prep(cdef, inc, libs):
                           define_macros=[("CURL_DISABLE_DEPRECATION", None)])
     return ffibuilder
 
+
 def source_prep():
     # Download libcurl from JBB for Linux and Windows
     key = jbb.get_key()
-    outdir = f"mcurllib/{key}"
+    outdir = f"{os.environ['TMP']}/mcurl/{key}"
     version = get_libcurl_version()
-    if sys.platform == "linux":
-        jbb.jbb("Kerberos_krb5", outdir=outdir, quiet=False)
+    libs = []
     if sys.platform != "darwin":
-        lib = jbb.jbb(f"LibCURL-v{version}+0", outdir=outdir, quiet=False)
-        lib = os.path.abspath(lib)
-        libs = [lib]
+        libs.extend(
+            jbb.jbb(f"LibCURL-v{version}", outdir=outdir,
+                    project="genotrance", quiet=False)
+        )
 
         # Header file location
-        curlh = f"{lib}/dl/LibCURL/include/curl/curl.h"
+        curlh = f"{outdir}/LibCURL/include/curl/curl.h"
     else:
-        libs = []
-        for dep in ["curl", "libnghttp2", "libidn2", "rtmpdump", "libssh2", "openssl@3", "openldap", "zstd", "brotli"]:
+        # brew deps --tree --installed curl
+        for dep in ["curl", "libnghttp2", "libidn2", "rtmpdump", "libssh2", "openssl@3", "zstd", "brotli"]:
             libs.append("/usr/local/opt/" + dep + "/lib")
 
         curlh = "/usr/local/opt/curl/include/curl/curl.h"
@@ -313,21 +322,20 @@ def source_prep():
     # Include directory
     inc = os.path.dirname(curlh)
 
-    # Copy libcurl.so.x to libcurl.so for linking
-    if sys.platform == "linux":
-        if not os.path.exists(f"{lib}/libcurl.so"):
-            lcso = glob.glob(f"{lib}/libcurl.so.*")[0]
-            shutil.copy(lcso, f"{lib}/libcurl.so")
-    elif sys.platform == "win32":
-        if not os.path.exists(f"{lib}/libcurl.dll"):
-            lcdll = glob.glob(f"{lib}/libcurl-*.dll")[0]
-            shutil.copy(lcdll, f"{lib}/libcurl.dll")
+    if sys.platform == "win32":
+        # Copy libcurl-4.dll to libcurl.dll
+        if not os.path.exists(f"{libs[0]}/libcurl.dll"):
+            lcdll = glob.glob(f"{libs[0]}/libcurl-*.dll")[0]
+            shutil.copy(lcdll, f"{libs[0]}/libcurl.dll")
 
     # Download CAcerts
     pemdst = "mcurl/cacert.pem"
-    lib = jbb.jbb("mozillaCACerts", outdir=outdir, quiet=False)
-    pemsrc = glob.glob(f"{lib}/dl/**/cacert.pem", recursive=True)[0]
-    shutil.copy(pemsrc, pemdst)
+    jbb.jbb("mozillaCACerts", outdir=outdir, quiet=False)
+    pemsrc = glob.glob(f"{outdir}/**/cacert.pem", recursive=True)[0]
+    try:
+        shutil.copy(pemsrc, pemdst)
+    except shutil.SameFileError:
+        pass
 
     # Preprocess and clean code
     cdef = get_preprocessor(curlh, recurse=True)
@@ -337,6 +345,7 @@ def source_prep():
 
     return cdef, inc, libs
 
+
 def ffibuilder():
     # Prepare libcurl
     cdef, inc, libs = source_prep()
@@ -345,11 +354,13 @@ def ffibuilder():
 
     return builder
 
+
 def main():
     builder = ffibuilder()
 
     # Build with cffi
     builder.compile(verbose=True)
+
 
 if __name__ == '__main__':
     main()
