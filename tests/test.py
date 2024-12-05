@@ -1,7 +1,12 @@
 import sys
 import time
+import uuid
+
+import pytest
+import pytest_httpbin
 
 import mcurl
+
 
 def dprint(msg):
     "Print message to stdout and debug file if open"
@@ -19,10 +24,14 @@ def dprint(msg):
             break
     sys.stdout.write(str(int(time.time())) + ": " + tree + ": " + msg + "\n")
 
-def query(url, method="GET", data = None, quit=True, check=False, insecure=False, multi=None, encoding="utf-8"):
+
+mcurl.dprint = dprint
+
+
+def query(url, method="GET", data=None, check=False, insecure=False, debug=False, multi=None, encoding="utf-8"):
     ec = mcurl.Curl(url, method)
-    if url.startswith("https"):
-        ec.set_insecure(insecure)
+    ec.set_insecure(insecure)
+    ec.set_debug(debug)
     if data is not None:
         ec.buffer(data.encode("utf-8"))
         ec.set_headers({"Content-Length": len(data)})
@@ -35,55 +44,55 @@ def query(url, method="GET", data = None, quit=True, check=False, insecure=False
     else:
         print(f"\nTesting {method} {url} multi")
         ret = 0 if multi.do(ec) else 1
-    if ret != 0:
-        print(f"Failed with error {ret}\n{ec.errstr}")
-        sys.exit(1)
-    else:
-        ret_data = ec.get_data(encoding=encoding)
-        print(f"\n{ec.get_headers()}Response length: {len(ret_data)}")
-        if check:
-            # Tests against httpbin
-            if url not in ret_data:
-                print(f"Failed: response does not contain {url}:\n{ret_data}")
-                sys.exit(2)
-            if data is not None and data not in ret_data:
-                print(f"Failed: response does not match {data}:\n{ret_data}")
-                sys.exit(3)
+    assert ret == 0, f"Failed with error {ret}\n{ec.errstr}"
 
-    if quit:
-        sys.exit()
+    ret_data = ec.get_data(encoding=encoding)
+    print(f"\n{ec.get_headers()}Response length: {len(ret_data)}")
+    if check:
+        # Tests against httpbin
+        assert url in ret_data, f"Failed: response does not contain {url}:\n{ret_data}"
 
-def queryall(testurl):
-    import uuid
+        if data is not None:
+            assert data in ret_data, f"Failed: response does not match {data}:\n{ret_data}"
 
-    multi = mcurl.MCurl()
 
-    insecure = False
-    if testurl == "all":
-        url = "://httpbin.org/"
-    elif testurl.startswith("all:"):
-        url = f"://{testurl[4:]}/"
-        insecure = True
-    else:
-        query(testurl, quit=True)
+@pytest.fixture(params=["GET", "POST", "PUT", "DELETE", "PATCH"])
+def method(request):
+    # All methods to test
+    return request.param
 
-    # HTTP verb tests
-    for method in ["GET", "POST", "PUT", "DELETE", "PATCH"]:
-        for protocol in ["http", "https"]:
-            testurl = protocol + url + method.lower()
-            data = str(uuid.uuid4()) if method in ["POST", "PUT", "PATCH"] else None
-            query(testurl, method, data, quit=False, check=True, insecure=insecure)
-            query(testurl, method, data, quit=False, check=True, insecure=insecure, multi=multi)
 
-    # Binary download tests
-    for protocol in ["http", "https"]:
-        testurl = protocol + url + "image/jpeg"
-        query(testurl, quit=False, insecure=insecure, encoding=None)
-        query(testurl, quit=False, insecure=insecure, multi=multi, encoding=None)
+@pytest.fixture(params=[False, True])
+def is_multi(request):
+    # Single or multi
+    return request.param
 
-    sys.exit()
 
-def check_deps():
+@pytest.fixture(params=[False, True])
+def is_debug(request):
+    # Enabled or disabled
+    return request.param
+
+
+def test_query(method, httpbin_both, is_multi, is_debug):
+    # Test all HTTP methods
+    testurl = httpbin_both.url + "/" + method.lower()
+    data = str(uuid.uuid4()) if method in [
+        "POST", "PUT", "PATCH"] else None
+    query(testurl, method, data, check=True, insecure=True, debug=is_debug,
+          multi=mcurl.MCurl() if is_multi else None)
+
+
+def test_binary(httpbin_both, is_multi, is_debug):
+    # Test binary data
+    testurl = httpbin_both.url + "/image/jpeg"
+    query(testurl, insecure=True, debug=is_debug, encoding=None)
+    query(testurl, insecure=True, debug=is_debug, multi=mcurl.MCurl()
+          if is_multi else None, encoding=None)
+
+
+def test_check_deps():
+    # Check all dependencies are available
     from _libcurl_cffi import lib as libcurl
 
     features = [
@@ -102,16 +111,6 @@ def check_deps():
     for feature in features:
         bit = getattr(libcurl, feature)
         avail = True if (bit & vinfo.features) > 0 else False
-        if not avail:
-            print(f"Error: {feature} not available in libcurl")
-            sys.exit(1)
+        assert avail, f"Error: {feature} not available in libcurl"
 
     print("All dependencies available")
-
-if __name__ == "__main__":
-    mcurl.dprint = dprint
-    check_deps()
-    if len(sys.argv) == 1:
-        queryall("all")
-    else:
-        queryall(sys.argv[1])

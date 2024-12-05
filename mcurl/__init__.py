@@ -121,12 +121,15 @@ def save_auth(curl, msg):
     "Find and cache proxy auth mechanism from headers sent by libcurl"
     if curl.proxy in MCURL.proxytype:
         # Already cached
+        dprint(f"{curl.easyhash}: Proxy auth mechanism already cached")
         return True
 
     if curl.auth is None:
         # No need to cache auth - client will authenticate directly
+        dprint(f"{curl.easyhash}: Skipping caching proxy auth mechanism")
         return True
 
+    dprint(f"{curl.easyhash}: Checking proxy auth mechanism: {msg}")
     if msg.startswith("Proxy-Authorization:"):
         # Cache auth mechanism from proxy headers
         proxytype = msg.split(" ")[1].upper()
@@ -135,34 +138,6 @@ def save_auth(curl, msg):
                f"{curl.proxy} as {proxytype}")
 
         # Cached
-        return True
-
-    # Not yet cached
-    return False
-
-
-def save_upstream(curl, msg):
-    "Find which server libcurl connected to - upstream proxy or target server"
-    if curl.upstream is not None:
-        # Already cached
-        return True
-
-    if msg.startswith("Connected to"):
-        curl.upstream = msg.split(" ")[2]
-    elif msg.startswith("Re-using existing connection"):
-        curl.upstream = msg.split(" ")[-1]
-
-    if curl.upstream is not None:
-        if curl.upstream == "(nil)":
-            # Older libcurl workaround
-            ret, curl.upstream = curl.get_primary_ip()
-        if curl.upstream == "127.0.0.1" and curl.proxy == "localhost":
-            # Older libcurl workaround
-            curl.upstream = curl.proxy
-        dprint(curl.easyhash + ": Upstream server = " + curl.upstream)
-        if curl.proxy is not None and curl.upstream == curl.proxy:
-            dprint(curl.easyhash + ": Upstream server is proxy")
-            curl.is_proxied = True
         return True
 
     # Not yet cached
@@ -204,8 +179,6 @@ def debug_callback(easy, infotype, data, size, userp):
         dprint(prefix + sanitized(msg))
         if infotype == libcurl.CURLINFO_HEADER_OUT:
             save_auth(curl, msg)
-        elif infotype == libcurl.CURLINFO_TEXT:
-            save_upstream(curl, msg)
 
     return libcurl.CURLE_OK
 
@@ -215,7 +188,6 @@ def wa_callback(easy, infotype, data, size, userp):
     """
     curl debug callback to get info not provided by libcurl today
     - proxy auth mechanism from sent headers
-    - upstream server connected to from curl info
     """
 
     del userp
@@ -226,12 +198,6 @@ def wa_callback(easy, infotype, data, size, userp):
         for msg in yield_msgs(data, size):
             if save_auth(curl, msg):
                 # Ignore rest of headers since auth (already) cached
-                break
-    elif infotype == libcurl.CURLINFO_TEXT:
-        # If curl info
-        for msg in yield_msgs(data, size):
-            if save_upstream(curl, msg):
-                # Ignore rest of headers since upstream server found
                 break
 
     return libcurl.CURLE_OK
@@ -358,14 +324,12 @@ class Curl:
     resp = 503
     sentheaders = False
     suppress = False
-    upstream = None
 
     # Flags
     is_connect = False
     is_easy = False
     is_patch = False
     is_post = False
-    is_proxied = False
     is_tunnel = False
     is_upload = False
 
@@ -410,11 +374,13 @@ class Curl:
         # libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TIMEOUT, py2clong(60))
 
         # SSL CAINFO
-        cainfo = os.path.join(os.path.dirname(__file__), "cacert.pem")
-        if os.path.exists(cainfo):
-            dprint(self.easyhash + ": Using CAINFO from " + cainfo)
-            libcurl.curl_easy_setopt(
-                self.easy, libcurl.CURLOPT_CAINFO, py2cstr(cainfo))
+        if sys.platform != "win32":
+            # libcurl uses schannel on Windows which uses system CA certs
+            cainfo = os.path.join(os.path.dirname(__file__), "cacert.pem")
+            if os.path.exists(cainfo):
+                dprint(self.easyhash + ": Using CAINFO from " + cainfo)
+                libcurl.curl_easy_setopt(
+                    self.easy, libcurl.CURLOPT_CAINFO, py2cstr(cainfo))
 
         # Set HTTP method
         self.method = method
@@ -482,7 +448,7 @@ class Curl:
         libcurl.curl_easy_setopt(
             self.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.wa_callback)
 
-        # Need libcurl verbose to save proxy auth mechanism and upstream server
+        # Need libcurl verbose to save proxy auth mechanism
         self.set_verbose()
 
     def reset(self, url, method="GET", request_version="HTTP/1.1", connect_timeout=60):
@@ -507,12 +473,10 @@ class Curl:
         self.resp = 503
         self.sentheaders = False
         self.suppress = False
-        self.upstream = None
 
         self.is_connect = False
         self.is_patch = False
         self.is_post = False
-        self.is_proxied = False
         self.is_tunnel = False
         self.is_upload = False
 
@@ -775,6 +739,13 @@ class Curl:
         ret = libcurl.curl_easy_getinfo(
             self.easy, libcurl.CURLINFO_PRIMARY_IP, ip)
         return ret, ffi.string(ip).decode("utf-8")
+
+    def get_used_proxy(self):
+        "Return whether proxy was used for this easy instance"
+        used_proxy = ffi.new("long *")
+        ret = libcurl.curl_easy_getinfo(
+            self.easy, libcurl.CURLINFO_USED_PROXY, used_proxy)
+        return ret, used_proxy[0] != 0
 
     def get_data(self, encoding="utf-8"):
         """
@@ -1132,7 +1103,12 @@ class MCurl:
         curl_sock = socket.fromfd(
             curl.sock_fd, socket.AF_INET, socket.SOCK_STREAM)
 
-        if curl.is_connect and (not curl.is_tunnel and curl.is_proxied):
+        ret, used_proxy = curl.get_used_proxy()
+        if ret != libcurl.CURLE_OK:
+            dprint(curl.easyhash + ": Failed to get used proxy: " + str(ret))
+            return
+
+        if curl.is_connect and (not curl.is_tunnel and used_proxy):
             # Send original headers from client to tunnel and authenticate with
             # upstream proxy
             dprint(curl.easyhash + ": Sending original client headers")

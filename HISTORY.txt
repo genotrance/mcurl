@@ -3,6 +3,10 @@ v8.9.1.0 - 2024-10-16
 - Fixed bug which was causing an error when downloading binary data
 - Fixed bug reported in genotrance/Px:214 - accessing uninitialized
   headers
+- Fixed genotrance/Px:224 - allow custom certs in Windows by not using
+  bundled CA certs
+- Replaced code that used debug output to detect whether upstream is
+  a proxy with CURLINFO_USED_PROXY introduced in libcurl v8.7.0
 
 v8.6.0.1 - 2024-02-19
 - Initial release
