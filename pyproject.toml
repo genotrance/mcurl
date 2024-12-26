@@ -1,10 +1,10 @@
 [build-system]
 build-backend = "setuptools.build_meta"
-requires = ["cffi", "jbb", "setuptools", "wheel"]
+requires = ["cffi", "jbb", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.9.1.0"
+version = "8.11.0.0"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -30,6 +30,7 @@ classifiers = [
         "Topic :: Internet :: WWW/HTTP"
 ]
 dependencies = ["cffi"]
+requires-python = ">=3.8"
 
 [project.urls]
 Homepage = "https://github.com/genotrance/mcurl"
@@ -40,9 +41,43 @@ Issues = "https://github.com/genotrance/mcurl/issues"
 packages = ["mcurl"]
 include-package-data = true
 
-[tool.tox]
-envlist = ["py38", "py39", "py310", "py311", "py312", "py313"]
+[tool.distutils.bdist_wheel]
+py_limited_api = "cp32"
 
-[tool.tox.env_run_base]
-deps = ["pytest", "pytest-xdist", "pytest-httpbin"]
-commands = [["pytest", "-n", "auto", "tests/test.py"]]
+[tool.cibuildwheel]
+build-frontend = "build[uv]"
+skip = ["pp*", "*-musllinux_i686"]
+test-requires = ["pytest", "pytest-httpbin"]
+test-command = "pytest {project}/tests/test.py"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "i686", "aarch64"]
+environment = { TMP="/tmp" }
+repair-wheel-command = [
+  "uv pip install jbb",
+  "export KEY=$(python -c 'import jbb; print(jbb.get_key())')",
+  "export LIB_DIRS=$(python -m jbb -d $TMP/mcurl/$KEY -q LibCURL)",
+  "LD_LIBRARY_PATH=$LIB_DIRS auditwheel repair -w {dest_dir} {wheel}",
+]
+
+[tool.cibuildwheel.macos]
+environment = { TMP="/tmp" }
+repair-wheel-command = [
+  "export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d'.' -f1).0",
+  "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+# Fix setuptools to link with -lpython3 instead of -lpythonXX when using mingw32 on Windows
+# https://github.com/pypa/setuptools/issues/4224
+before-build = [
+  "uv pip install setuptools",
+  "python -c \"import setuptools; f=setuptools.__file__.replace('__init__', r'command\\build_ext'); d=open(f).read(); p=d.find('if use_stubs or os.name'); assert p!=-1, 'Failed to find use_stubs'; open(f, 'w').write(d[:p] + '    def get_libraries(self, ext): return _build_ext.get_libraries(self, ext)[:-1] + [\\'python3\\']\\n\\n' + d[p:])\""
+]
+# Build with mingw32
+config-settings = "--build-option=build --build-option=--compiler --build-option=mingw32"
+repair-wheel-command = [
+  "uv pip install delvewheel jbb",
+  "python -c \"import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\\\mcurl\\\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])\""
+]

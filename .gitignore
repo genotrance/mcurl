@@ -3,6 +3,7 @@
 build/
 dist/
 wheel/
+wheelhouse/
 __pycache__/
 mcurllib/
 *.h

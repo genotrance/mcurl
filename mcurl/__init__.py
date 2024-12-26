@@ -1020,8 +1020,7 @@ class MCurl:
             curl.resp = 400
             curl.errstr += "URL malformed"
         elif curl.cerr in [libcurl.CURLE_UNSUPPORTED_PROTOCOL,
-                           libcurl.CURLE_NOT_BUILT_IN,
-                           libcurl.CURLE_FUNCTION_NOT_FOUND]:
+                           libcurl.CURLE_NOT_BUILT_IN]:
             # Not implemented
             curl.resp = 501
             curl.errstr += "Unsupported protocol, not built-in, or function not found"

@@ -301,7 +301,7 @@ def cffi_prep(cdef, inc, libs):
 def source_prep():
     # Download libcurl from JBB for Linux and Windows
     key = jbb.get_key()
-    outdir = f"{os.environ['TMP']}/mcurl/{key}"
+    outdir = f"{os.environ['TMP']}{os.sep}mcurl{os.sep}{key}"
     version = get_libcurl_version()
     libs = []
     if sys.platform != "darwin":
@@ -311,13 +311,19 @@ def source_prep():
         )
 
         # Header file location
-        curlh = f"{outdir}/LibCURL/include/curl/curl.h"
+        curlh = f"{outdir}{os.sep}LibCURL{os.sep}include{os.sep}curl{os.sep}curl.h"
     else:
-        # brew deps --tree --installed curl
-        for dep in ["curl", "libnghttp2", "libidn2", "rtmpdump", "libssh2", "openssl@3", "zstd", "brotli"]:
-            libs.append("/usr/local/opt/" + dep + "/lib")
+        prefix = subprocess.check_output(
+            "brew --prefix", shell=True, text=True).strip()
+        deps = ["curl"] + subprocess.check_output(
+            "brew deps -n --installed curl", shell=True, text=True
+        ).splitlines()
+        for dep in deps:
+            if dep == "ca-certificates":
+                continue
+            libs.append(prefix + "/opt/" + dep + "/lib")
 
-        curlh = "/usr/local/opt/curl/include/curl/curl.h"
+        curlh = prefix + "/opt/curl/include/curl/curl.h"
 
     # Include directory
     inc = os.path.dirname(curlh)
