@@ -18,6 +18,7 @@ pip install pymcurl
 Binary [packages](https://pypi.org/project/pymcurl) are provided the following platforms:
 - aarch64-linux-gnu
 - aarch64-linux-musl
+- arm64-mac
 - i686-linux-gnu
 - x86_64-linux-gnu
 - x86_64-linux-musl
@@ -160,6 +161,9 @@ CLASSES
      |  get_response(self)
      |      Return response code of completed request
      |
+     |  get_used_proxy(self)
+     |      Return whether proxy was used for this easy instance
+     |
      |  perform(self)
      |      Perform the easy handle
      |
@@ -240,8 +244,7 @@ FUNCTIONS
     debug_callback(easy, infotype, data, size, userp)
         Prints out curl debug info and headers sent/received
 
-    dprint lambda x
-        # Debug shortcut
+    dprint(x)
 
     getauth(auth)
         Return auth value for specified authentication string
@@ -285,9 +288,6 @@ FUNCTIONS
     save_auth(curl, msg)
         Find and cache proxy auth mechanism from headers sent by libcurl
 
-    save_upstream(curl, msg)
-        Find which server libcurl connected to - upstream proxy or target server
-
     socket_callback(easy, sock_fd, ev_bitmask, userp, socketp)
 
     sockopt_callback(clientp, sock_fd, purpose)
@@ -295,7 +295,6 @@ FUNCTIONS
     wa_callback(easy, infotype, data, size, userp)
         curl debug callback to get info not provided by libcurl today
         - proxy auth mechanism from sent headers
-        - upstream server connected to from curl info
 
     write_callback(buffer, size, nitems, userdata)
 
@@ -308,8 +307,9 @@ FUNCTIONS
 
 mcurl is built using gcc on Linux, clang on MacOS and mingw-x64 on Windows. The
 shared libraries are downloaded from [binarybuilder.org](https://binarybuilder.org/)
-using [jbb](https://pypi.org/projects/jbb) for Linux and Windows. MacOS packages the
-libcurl binaries installed via brew.
+using [jbb](https://pypi.org/projects/jbb) for Linux and Windows. Custom libcurl
+binaries that include `kerberos` support on Linux and remove the `libssh2` dependency
+are [included](https://github.com/genotrance/libcurl_jll.jl). MacOS includes the
+libcurl binaries and dependencies installed via brew.
 
-[build.sh](build.sh) can be used to build mcurl for all supported platforms including
-Windows.
+[cibuildwheel](https://cibuildwheel.pypa.io/) is used to build all the artifacts.

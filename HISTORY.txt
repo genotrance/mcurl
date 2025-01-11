@@ -1,4 +1,4 @@
-v8.11.0.0 - TBD
+v8.11.0.0 - 2025-01-10
 - Update to libcurl v8.11.0
 - Fixed bug which was causing an error when downloading binary data
 - Fixed bug reported in genotrance/Px:214 - accessing uninitialized
