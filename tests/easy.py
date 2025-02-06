@@ -1,6 +1,9 @@
-from mcurl import Curl
+import mcurl
 
-c = Curl('http://httpbin.org/get')
+mcurl.dprint = print
+
+c = mcurl.Curl('http://httpbin.org/get')
+c.set_debug()
 c.buffer()
 ret = c.perform()
 if ret == 0:

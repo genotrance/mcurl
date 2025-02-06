@@ -365,8 +365,10 @@ class Curl:
                (method, url, request_version))
 
         # Ignore proxy environment variables
-        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_PROXY, ffi.NULL)
-        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_NOPROXY, ffi.NULL)
+        libcurl.curl_easy_setopt(
+            self.easy, libcurl.CURLOPT_PROXY, ffi.new("char[]", b""))
+        libcurl.curl_easy_setopt(
+            self.easy, libcurl.CURLOPT_NOPROXY, ffi.new("char[]", b""))
 
         # Timeouts
         libcurl.curl_easy_setopt(
@@ -746,6 +748,13 @@ class Curl:
         ret = libcurl.curl_easy_getinfo(
             self.easy, libcurl.CURLINFO_USED_PROXY, used_proxy)
         return ret, used_proxy[0] != 0
+
+    def get_proxyauth_used(self):
+        "Return which proxy authentication mechanism was used for this easy instance"
+        proxyauth_used = ffi.new("long *")
+        ret = libcurl.curl_easy_getinfo(
+            self.easy, libcurl.CURLINFO_PROXYAUTH_USED, proxyauth_used)
+        return ret, proxyauth_used[0]
 
     def get_data(self, encoding="utf-8"):
         """

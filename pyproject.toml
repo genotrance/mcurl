@@ -4,7 +4,7 @@ requires = ["cffi", "jbb", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.11.0.0"
+version = "8.11.0.1"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -54,7 +54,7 @@ test-command = "pytest {project}/tests/test.py"
 archs = ["x86_64", "i686", "aarch64"]
 environment = { TMP="/tmp" }
 repair-wheel-command = [
-  "uv pip install jbb",
+  "uv pip install jbb --system",
   "export KEY=$(python -c 'import jbb; print(jbb.get_key())')",
   "export LIB_DIRS=$(python -m jbb -d $TMP/mcurl/$KEY -q LibCURL)",
   "LD_LIBRARY_PATH=$LIB_DIRS auditwheel repair -w {dest_dir} {wheel}",

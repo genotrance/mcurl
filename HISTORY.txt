@@ -1,3 +1,7 @@
+v8.11.0.1 - TBD
+- Fixed bug where libcurl was incorrectly picking up http_proxy and
+  no_proxy env variables
+
 v8.11.0.0 - 2025-01-10
 - Update to libcurl v8.11.0
 - Fixed bug which was causing an error when downloading binary data
