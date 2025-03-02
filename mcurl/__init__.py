@@ -24,7 +24,8 @@ except OSError as exc:
 # Debug shortcut
 
 
-def dprint(x): return None
+def dprint(_):
+    pass
 
 
 MCURL = None
@@ -117,32 +118,6 @@ def getauth(auth):
     return authval
 
 
-def save_auth(curl, msg):
-    "Find and cache proxy auth mechanism from headers sent by libcurl"
-    if curl.proxy in MCURL.proxytype:
-        # Already cached
-        dprint(f"{curl.easyhash}: Proxy auth mechanism already cached")
-        return True
-
-    if curl.auth is None:
-        # No need to cache auth - client will authenticate directly
-        dprint(f"{curl.easyhash}: Skipping caching proxy auth mechanism")
-        return True
-
-    dprint(f"{curl.easyhash}: Checking proxy auth mechanism: {msg}")
-    if msg.startswith("Proxy-Authorization:"):
-        # Cache auth mechanism from proxy headers
-        proxytype = msg.split(" ")[1].upper()
-        MCURL.proxytype[curl.proxy] = proxytype
-        dprint(f"{curl.easyhash}: Caching proxy auth mechanism for " +
-               f"{curl.proxy} as {proxytype}")
-
-        # Cached
-        return True
-
-    # Not yet cached
-    return False
-
 # Active thread running callbacks can print debug output for any other
 # thread's easy - cannot assume it is for this thread. All dprint()s
 # include easyhash to correlate instead
@@ -177,28 +152,6 @@ def debug_callback(easy, infotype, data, size, userp):
 
     for msg in yield_msgs(data, size):
         dprint(prefix + sanitized(msg))
-        if infotype == libcurl.CURLINFO_HEADER_OUT:
-            save_auth(curl, msg)
-
-    return libcurl.CURLE_OK
-
-
-@ffi.def_extern()
-def wa_callback(easy, infotype, data, size, userp):
-    """
-    curl debug callback to get info not provided by libcurl today
-    - proxy auth mechanism from sent headers
-    """
-
-    del userp
-    easyhash = gethash(easy)
-    curl = MCURL.handles[easyhash]
-    if infotype == libcurl.CURLINFO_HEADER_OUT:
-        # If sent header
-        for msg in yield_msgs(data, size):
-            if save_auth(curl, msg):
-                # Ignore rest of headers since auth (already) cached
-                break
 
     return libcurl.CURLE_OK
 
@@ -446,12 +399,6 @@ class Curl:
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTP_VERSION,
                                  py2clong(getattr(libcurl, "CURL_HTTP_VERSION_" + version)))
 
-        # Debug callback default disabled
-        libcurl.curl_easy_setopt(
-            self.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.wa_callback)
-
-        # Need libcurl verbose to save proxy auth mechanism
-        self.set_verbose()
 
     def reset(self, url, method="GET", request_version="HTTP/1.1", connect_timeout=60):
         "Reuse existing curl instance for another request"
@@ -535,20 +482,19 @@ class Curl:
             else:
                 dprint(self.easyhash + ": Blank password for user")
         if auth is not None:
-            if self.proxy in MCURL.proxytype:
+            if self.proxy in MCURL.proxyauth:
                 # Use cached value
-                self.auth = MCURL.proxytype[self.proxy]
+                self.auth = MCURL.proxyauth[self.proxy]
                 dprint(self.easyhash +
-                       ": Using cached proxy auth mechanism " + self.auth)
+                       f": Using cached proxy auth method: {self.auth}")
             else:
                 # Use specified value
-                self.auth = auth
+                self.auth = getauth(auth)
                 dprint(self.easyhash +
-                       ": Setting proxy auth mechanism to " + self.auth)
+                       f": Setting proxy auth method: {self.auth}")
 
-            authval = getauth(self.auth)
             libcurl.curl_easy_setopt(
-                self.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(authval))
+                self.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(self.auth))
 
             if self.is_connect:
                 # Proxy + auth so tunnel and authenticate
@@ -624,13 +570,9 @@ class Curl:
             self.easy, libcurl.CURLOPT_VERBOSE, py2cbool(enable))
 
     def set_debug(self, enable=True):
-        """
-        Enable debug output
-          Call after set_proxy() and set_auth() to enable discovery and caching of proxy
-          auth mechanism - libcurl does not provide an API to get this today - need to
-          find it in sent header debug output
-        """
+        "Enable debug output"
         if enable:
+            self.set_verbose()
             libcurl.curl_easy_setopt(
                 self.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
 
@@ -710,6 +652,7 @@ class Curl:
             dprint(self.easyhash + ": Connection failed: " +
                    str(self.cerr) + "; " + self.errstr)
         MCURL.handles.pop(self.easyhash)
+        self._save_auth()
         return self.cerr
 
     # Get status and info after running curl handle
@@ -750,7 +693,7 @@ class Curl:
         return ret, used_proxy[0] != 0
 
     def get_proxyauth_used(self):
-        "Return which proxy authentication mechanism was used for this easy instance"
+        "Return which proxy auth method was used for this easy instance"
         proxyauth_used = ffi.new("long *")
         ret = libcurl.curl_easy_getinfo(
             self.easy, libcurl.CURLINFO_PROXYAUTH_USED, proxyauth_used)
@@ -781,6 +724,31 @@ class Curl:
         if encoding is not None:
             val = val.decode(encoding)
         return val
+
+    def _save_auth(self):
+        "Find and cache proxy auth method used by libcurl"
+        if self.auth is None or self.cerr != libcurl.CURLE_OK:
+            # No need to check auth
+            # - No auth requested - client will authenticate directly
+            # - libcurl errror encountered
+            return
+
+        if self.proxy in MCURL.proxyauth:
+            # Already cached
+            dprint(f"{self.easyhash}: Proxy auth method already cached")
+            return
+
+        ret, proxyauth_used = self.get_proxyauth_used()
+        if ret == libcurl.CURLE_OK:
+            if proxyauth_used != 0:
+                # Cache auth mthod used by libcurl
+                MCURL.proxyauth[self.proxy] = proxyauth_used
+                self.auth = proxyauth_used
+                dprint(f"{self.easyhash}: Caching proxy auth method: {self.proxy} {proxyauth_used}")
+            else:
+                dprint( f"Proxy auth method not yet used: {self.auth}")
+        else:
+            dprint(f"Failed to get proxy auth method: {ret}")
 
 
 @ffi.def_extern()
@@ -856,7 +824,7 @@ class MCurl:
     _lock = None
 
     handles = None
-    proxytype = None
+    proxyauth = None
     failed = None  # Proxy servers with auth failures
     timer = None
     rlist = None
@@ -889,7 +857,7 @@ class MCurl:
 
         # Init
         self.handles = {}
-        self.proxytype = {}
+        self.proxyauth = {}
         self.failed = []
         self.rlist = []
         self.wlist = []
@@ -898,7 +866,7 @@ class MCurl:
     def setopt(self, option, value):
         "Configure multi options"
         if option in (libcurl.CURLMOPT_SOCKETFUNCTION, libcurl.CURLMOPT_TIMERFUNCTION):
-            raise Exception('Callback options reserved for the event loop')
+            raise Exception("Callback options reserved for the event loop")
         libcurl.curl_multi_setopt(self._multi, option, value)
 
     # Callbacks
@@ -1019,6 +987,7 @@ class MCurl:
                     break
                 self._perform()
                 time.sleep(0.01)
+            curl._save_auth()
         else:
             dprint(curl.easyhash + ": Using easy interface")
             curl.perform()
@@ -1059,7 +1028,7 @@ class MCurl:
                     # Proxy auth did not work for whatever reason
                     out = "Proxy authentication failed: "
                     if curl.user is not None:
-                        out += "check user/password or try different auth mechanism"
+                        out += "check user/password or try different auth method"
                     else:
                         out += "single sign-on failed, user/password might be required"
 

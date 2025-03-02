@@ -1,6 +1,9 @@
-v8.11.0.1 - TBD
-- Fixed bug where libcurl was incorrectly picking up http_proxy and
-  no_proxy env variables
+v8.12.1.1 - TBD
+- Fixed genotrance/Px:243 - libcurl was incorrectly picking up
+  http_proxy and no_proxy env variables
+- Replaced code that used debug output to detect the proxy auth
+  mechanism used by libcurl with CURLINFO_PROXYAUTH_USED introduced
+  in libcurl v8.12.0
 
 v8.11.0.0 - 2025-01-10
 - Update to libcurl v8.11.0
