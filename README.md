@@ -167,6 +167,9 @@ CLASSES
      |  get_primary_ip(self)
      |      Return primary IP address of this easy instance
      |
+     |  get_proxyauth_used(self)
+     |      Return which proxy auth method was used for this easy instance
+     |
      |  get_response(self)
      |      Return response code of completed request
      |
@@ -184,9 +187,6 @@ CLASSES
      |
      |  set_debug(self, enable=True)
      |      Enable debug output
-     |        Call after set_proxy() and set_auth() to enable discovery and caching of proxy
-     |        auth mechanism - libcurl does not provide an API to get this today - need to
-     |        find it in sent header debug output
      |
      |  set_follow(self, enable=True)
      |      Set curl to follow 3xx responses
@@ -246,6 +246,7 @@ CLASSES
 
 FUNCTIONS
     curl_version()
+        Get curl version as numeric representation
 
     cvp2pystr(cvoidp)
         Convert void * to Python string
@@ -253,7 +254,13 @@ FUNCTIONS
     debug_callback(easy, infotype, data, size, userp)
         Prints out curl debug info and headers sent/received
 
-    dprint(x)
+    dprint(_)
+
+    get_curl_features()
+        Get all supported feature names from version info data
+
+    get_curl_vinfo()
+        Get curl version info data
 
     getauth(auth)
         Return auth value for specified authentication string
@@ -294,16 +301,9 @@ FUNCTIONS
     sanitized(msg)
         Hide user sensitive data from debug output
 
-    save_auth(curl, msg)
-        Find and cache proxy auth mechanism from headers sent by libcurl
-
     socket_callback(easy, sock_fd, ev_bitmask, userp, socketp)
 
     sockopt_callback(clientp, sock_fd, purpose)
-
-    wa_callback(easy, infotype, data, size, userp)
-        curl debug callback to get info not provided by libcurl today
-        - proxy auth mechanism from sent headers
 
     write_callback(buffer, size, nitems, userdata)
 

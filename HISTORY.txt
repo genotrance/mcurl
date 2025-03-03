@@ -1,9 +1,14 @@
 v8.12.1.1 - TBD
 - Fixed genotrance/Px:243 - libcurl was incorrectly picking up
   http_proxy and no_proxy env variables
+- Fixed genotrance/Px:223 - index error when accessing write data in
+  select loop
 - Replaced code that used debug output to detect the proxy auth
   mechanism used by libcurl with CURLINFO_PROXYAUTH_USED introduced
   in libcurl v8.12.0
+- Use new 'feature_names' method to check for libcurl features, add
+  'get_curl_vinfo()' and 'get_curl_features()', and include Python
+  version in debug output
 
 v8.11.0.0 - 2025-01-10
 - Update to libcurl v8.11.0

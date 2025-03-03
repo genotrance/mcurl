@@ -2,6 +2,7 @@
 
 import io
 import os.path
+import platform
 import select
 import socket
 import sys
@@ -798,23 +799,40 @@ def sockopt_callback(clientp, sock_fd, purpose):
     return libcurl.CURLE_OK
 
 
+def get_curl_vinfo():
+    "Get curl version info data"
+    return libcurl.curl_version_info(libcurl.CURLVERSION_LAST-1)
+
+
+def get_curl_features():
+    "Get all supported feature names from version info data"
+    vinfo = get_curl_vinfo()
+    features = []
+    i = 0
+    while vinfo.feature_names[i] != ffi.NULL:
+        feature = ffi.string(vinfo.feature_names[i]).decode("utf-8")
+        features.append(feature)
+        i += 1
+    return features
+
+
 def print_curl_version():
     "Display curl version information"
-    dprint(ffi.string(libcurl.curl_version()).decode("utf-8"))
     vinfo = libcurl.curl_version_info(libcurl.CURLVERSION_LAST-1)
-    for feature in [
-        "CURL_VERSION_SSL", "CURL_VERSION_SSPI", "CURL_VERSION_SPNEGO",
-        "CURL_VERSION_GSSAPI", "CURL_VERSION_GSSNEGOTIATE",
-        "CURL_VERSION_KERBEROS5", "CURL_VERSION_NTLM", "CURL_VERSION_NTLM_WB"
-    ]:
-        bit = getattr(libcurl, feature)
-        avail = True if (bit & vinfo.features) > 0 else False
-        dprint("%s: %s" % (feature, avail))
-    dprint("Host: " + ffi.string(vinfo.host).decode("utf-8"))
+    dprint(f'Host: {ffi.string(vinfo.host).decode("utf-8")} Python: v{platform.python_version()}')
+    dprint(ffi.string(libcurl.curl_version()).decode("utf-8"))
+    features = get_curl_features()
+    relevant = ""
+    for feature in ["GSS-API", "Kerberos", "NTLM", "SPNEGO", "SSL", "SSPI"]:
+        if feature in features:
+            relevant += feature + " "
+    if len(relevant) != 0:
+        dprint("Features: " + relevant)
 
 
 def curl_version():
-    return libcurl.curl_version_info(libcurl.CURLVERSION_LAST-1).version_num
+    "Get curl version as numeric representation"
+    return get_curl_vinfo().version_num
 
 
 class MCurl:
@@ -1158,6 +1176,9 @@ class MCurl:
                         wdata = sdata
                     else:
                         wdata = cdata
+                    # Fix #223
+                    if not wdata:
+                        continue
                     data = wdata[0]
                     # socket.send() may sending only a part of the data
                     # (as documentation says). To ensure sending all data
