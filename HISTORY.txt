@@ -1,4 +1,4 @@
-v8.12.1.1 - TBD
+v8.12.1.1 - 2025-03-08
 - Fixed genotrance/Px:243 - libcurl was incorrectly picking up
   http_proxy and no_proxy env variables
 - Fixed genotrance/Px:223 - index error when accessing write data in
