@@ -71,12 +71,12 @@ repair-wheel-command = [
 archs = ["AMD64"]
 # Fix setuptools to link with -lpython3 instead of -lpythonXX when using mingw32 on Windows
 # https://github.com/pypa/setuptools/issues/4224
-before-build = [
-  "uv pip install setuptools",
-  "python -c \"import setuptools; f=setuptools.__file__.replace('__init__', r'command\\build_ext'); d=open(f).read(); p=d.find('if use_stubs or os.name'); assert p!=-1, 'Failed to find use_stubs'; open(f, 'w').write(d[:p] + '    def get_libraries(self, ext): return _build_ext.get_libraries(self, ext)[:-1] + [\\'python3\\']\\n\\n' + d[p:])\""
-]
+# before-build = [
+#   "uv pip install setuptools",
+#   "python -c \"import setuptools; f=setuptools.__file__.replace('__init__', r'command\\build_ext'); d=open(f).read(); p=d.find('if use_stubs or os.name'); assert p!=-1, 'Failed to find use_stubs'; open(f, 'w').write(d[:p] + '    def get_libraries(self, ext): return _build_ext.get_libraries(self, ext)[:-1] + [\\'python3\\']\\n\\n' + d[p:])\""
+# ]
 # Build with mingw32
-config-settings = "--build-option=build --build-option=--compiler --build-option=mingw32"
+# config-settings = "--build-option=build --build-option=--compiler --build-option=mingw32"
 repair-wheel-command = [
   "uv pip install delvewheel jbb",
   "python -c \"import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\\\mcurl\\\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])\""
