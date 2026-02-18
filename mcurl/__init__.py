@@ -1031,7 +1031,7 @@ class MCurl:
             curl.resp = 504
             curl.errstr += "Operation timed out"
 
-        if curl.proxy is not None:
+        elif curl.proxy is not None:
             ret, codep = curl.get_response()
             if ret == 0 and codep == 407:
                 # Proxy authentication required
