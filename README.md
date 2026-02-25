@@ -238,6 +238,9 @@ CLASSES
      |  select(self, curl: mcurl.Curl, client_sock, idle=30)
      |      Run select loop between client and curl
      |
+     |  set_failure_threshold(self, threshold)
+     |      Set the number of authentication failures before blocking a proxy
+     |
      |  setopt(self, option, value)
      |      Configure multi options
      |

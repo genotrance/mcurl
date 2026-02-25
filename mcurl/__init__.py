@@ -448,8 +448,8 @@ class Curl:
 
     def set_proxy(self, proxy, port=0, noproxy=None):
         "Set proxy options - returns False if this proxy server has auth failures"
-        if proxy in MCURL.failed:
-            dprint(self.easyhash + ": Authentication issues with this proxy server")
+        if proxy in MCURL.failed and MCURL.failed[proxy] >= MCURL.failure_threshold:
+            dprint(self.easyhash + f": Authentication issues with this proxy server (failed {MCURL.failure_threshold} times)")
             return False
 
         self.proxy = proxy
@@ -876,7 +876,8 @@ class MCurl:
         # Init
         self.handles = {}
         self.proxyauth = {}
-        self.failed = []
+        self.failed = {}
+        self.failure_threshold = 3
         self.rlist = []
         self.wlist = []
         self._lock = threading.Lock()
@@ -886,6 +887,12 @@ class MCurl:
         if option in (libcurl.CURLMOPT_SOCKETFUNCTION, libcurl.CURLMOPT_TIMERFUNCTION):
             raise Exception("Callback options reserved for the event loop")
         libcurl.curl_multi_setopt(self._multi, option, value)
+
+    def set_failure_threshold(self, threshold):
+        "Set the number of authentication failures before blocking a proxy"
+        if threshold < 1:
+            raise ValueError("Threshold must be at least 1")
+        self.failure_threshold = threshold
 
     # Callbacks
 
@@ -1053,9 +1060,9 @@ class MCurl:
                     curl.resp = 401
                     curl.errstr += out + "; "
 
-                    # Add this proxy to failed list and don't try again
+                    # Increment failure count for this proxy; block after threshold attempts
                     with self._lock:
-                        self.failed.append(curl.proxy)
+                        self.failed[curl.proxy] = self.failed.get(curl.proxy, 0) + 1
                 else:
                     # Setup client to authenticate directly with upstream proxy
                     dprint(curl.easyhash +
@@ -1063,6 +1070,10 @@ class MCurl:
                     if not curl.is_connect:
                         # curl.errstr not set else connection will get closed during auth
                         curl.resp = codep
+            else:
+                # Successful (or non‑auth) response – reset failure counter for this proxy
+                with self._lock:
+                    self.failed[curl.proxy] = 0
 
         if curl.is_connect and curl.sock_fd is None:
             # Need sock_fd for select()

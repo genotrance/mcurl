@@ -1,5 +1,6 @@
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -89,7 +90,8 @@ extern "Python" int wa_callback (CURL * handle, curl_infotype type, char *data, 
 
 FILTERS = [
     "va_list",
-    "__asm__"
+    "__asm__",
+    "CURL_HAS_DECLSPEC_ATTRIBUTE"
 ]
 
 DEFINES = {}
@@ -156,6 +158,9 @@ def code_cleanup(code):
                         for key in sorted(DEFINES.keys(), reverse=True):
                             if key in spl[2]:
                                 spl[2] = spl[2].replace(key, str(DEFINES[key]))
+
+                    # Replace instances of \d+L with \d+
+                    spl[2] = re.sub(r'(\d+)L\b', r'\1', spl[2])
 
                     # Evaluate value in Python - works for bit shifts, |, etc.
                     try:

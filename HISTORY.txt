@@ -1,3 +1,8 @@
+v8.15.0.1 - TBD
+- Dropped Python 3.8 support, added Python 3.14 support
+- Added configurable proxy authentication failure threshold with default of 3
+  attempts before blocking a proxy, use set_failure_threshold() to configure
+
 v8.12.1.1 - 2025-03-08
 - Fixed genotrance/Px:243 - libcurl was incorrectly picking up
   http_proxy and no_proxy env variables
