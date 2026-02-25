@@ -4,7 +4,7 @@ requires = ["cffi", "jbb", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.15.0.1"
+version = "8.18.0.1"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}

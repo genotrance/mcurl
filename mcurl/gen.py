@@ -195,6 +195,7 @@ def gen_callbacks(code):
         if line.startswith("typedef") and "(*" in line and "_callback" in line:
             callbacks += (line.replace("typedef", "extern \"Python\"")
                           .replace("(*curl_", "", 1).replace("(*_curl", "")
+                          .replace("(*Wcurl_", "", 1).replace("(*_Wcurl", "")
                           .replace(")", "", 1) + "\n")
 
     return callbacks

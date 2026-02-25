@@ -1,13 +1,10 @@
-Manage outbound HTTP connections using Curl & CurlMulti
+# mcurl
 
-### Description
+Python wrapper for [libcurl](https://curl.haxx.se/libcurl/) with a high-level
+API for the easy and multi interfaces. Originally created for the
+[Px](https://github.com/genotrance/px) proxy server.
 
-mcurl is a Python wrapper for [libcurl](https://curl.haxx.se/libcurl/) with a
-high-level API that makes it easy to interact with the libcurl easy and multi
-interfaces. It was originally created for the [Px](https://github.com/genotrance/px)
-proxy server which uses libcurl to handle upstream proxy authentication.
-
-### Usage
+## Installation
 
 mcurl can be installed using pip:
 
@@ -15,7 +12,7 @@ mcurl can be installed using pip:
 pip install pymcurl
 ```
 
-Binary [packages](https://pypi.org/project/pymcurl) are provided the following platforms:
+Binary [packages](https://pypi.org/project/pymcurl) are provided for the following platforms:
 - aarch64-linux-gnu
 - aarch64-linux-musl
 - arm64-mac
@@ -32,9 +29,11 @@ the shared libraries into the wheels.
 
 Thanks to [cffi](https://cffi.readthedocs.io/en/latest/cdef.html#ffibuilder-compile-etc-compiling-out-of-line-modules)
 and [Py_LIMITED_API](https://docs.python.org/3/c-api/stable.html#limited-c-api),
-these mcurl binaries should work on any Python from v3.2 onwards.
+these binaries work on any Python from v3.2 onwards.
 
-#### Easy interface
+## Usage
+
+### Easy interface
 
 ```python
 import mcurl
@@ -52,7 +51,7 @@ if ret == 0:
     print(f"Response: {resp}\n\n{headers}{data}")
 ```
 
-#### Multi interface
+### Multi interface
 
 ```python
 import mcurl
@@ -97,7 +96,7 @@ else:
 m.close()
 ```
 
-#### libcurl API
+### libcurl API
 
 The [libcurl API](https://curl.se/libcurl/c/) can be directly accessed as is done
 in [mcurl](mcurl/__init__.py) if preferred.
@@ -114,16 +113,11 @@ libcurl.curl_easy_setopt(easy, libcurl.CURLOPT_URL, curl)
 cerr = libcurl.curl_easy_perform(easy)
 ```
 
-#### API reference
+### API reference
 
 ```
 NAME
     mcurl - Manage outbound HTTP connections using Curl & CurlMulti
-
-CLASSES
-    builtins.object
-        Curl
-        MCurl
 
     class Curl(builtins.object)
      |  Curl(url, method='GET', request_version='HTTP/1.1', connect_timeout=60)
@@ -212,7 +206,6 @@ CLASSES
      |  set_verbose(self, enable=True)
      |      Set verbose mode
      |
-
     class MCurl(builtins.object)
      |  MCurl(debug_print=None)
      |
@@ -246,7 +239,7 @@ CLASSES
      |
      |  stop(self, curl: mcurl.Curl)
      |      Stop a running curl handle and remove
-
+     |
 FUNCTIONS
     curl_version()
         Get curl version as numeric representation
@@ -312,10 +305,8 @@ FUNCTIONS
 
     yield_msgs(data, size)
         Generator for curl debug messages
-
 ```
-
-### Building mcurl
+## Building
 
 mcurl is built using gcc on Linux, clang on MacOS and mingw-x64 on Windows. The
 shared libraries are downloaded from [binarybuilder.org](https://binarybuilder.org/)

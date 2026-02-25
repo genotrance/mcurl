@@ -1,4 +1,4 @@
-v8.15.0.1 - TBD
+v8.18.0.1 - TBD
 - Dropped Python 3.8 support, added Python 3.14 support
 - Added configurable proxy authentication failure threshold with default of 3
   attempts before blocking a proxy, use set_failure_threshold() to configure
