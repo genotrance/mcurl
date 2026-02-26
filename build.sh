@@ -5,6 +5,8 @@ set -e
 WHEELHOUSE="./wheelhouse"
 FORCE=0
 UPDATE_DOCS=0
+ARCH_FILTER=""
+VARIANT_FILTER=""
 
 detect_latest_version() {
     echo "========================================="
@@ -203,9 +205,21 @@ while [[ $# -gt 0 ]]; do
             UPDATE_DOCS=1
             shift
             ;;
+        --arch)
+            ARCH_FILTER="$2"
+            shift 2
+            ;;
+        --variant)
+            VARIANT_FILTER="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--force] [--docs]"
+            echo "Usage: $0 [--force] [--docs] [--arch ARCH1,ARCH2,...] [--variant manylinux|musllinux|manylinux,musllinux]"
+            echo "  --force: Rebuild all wheels even if they exist"
+            echo "  --docs: Only update documentation and exit"
+            echo "  --arch: Comma-separated list of architectures (x86_64, i686, aarch64)"
+            echo "  --variant: Comma-separated list of Linux variants (manylinux, musllinux)"
             exit 1
             ;;
     esac
@@ -231,7 +245,38 @@ mkdir -p "$WHEELHOUSE"
 echo "Setting up binfmt for cross-platform builds..."
 docker run --privileged --rm tonistiigi/binfmt --install all
 
-ARCHS=("x86_64" "i686" "aarch64")
+# Parse architecture filter
+if [ -n "$ARCH_FILTER" ]; then
+    IFS=',' read -ra ARCHS <<< "$ARCH_FILTER"
+    echo "Building for specified architectures: ${ARCHS[*]}"
+else
+    ARCHS=("x86_64" "i686" "aarch64")
+fi
+
+# Parse variant filter and set CIBW_BUILD
+if [ -n "$VARIANT_FILTER" ]; then
+    BUILD_PATTERNS=()
+    IFS=',' read -ra VARIANTS <<< "$VARIANT_FILTER"
+    for VARIANT in "${VARIANTS[@]}"; do
+        case "$VARIANT" in
+            manylinux)
+                BUILD_PATTERNS+=("*-manylinux_*")
+                ;;
+            musllinux)
+                BUILD_PATTERNS+=("*-musllinux_*")
+                ;;
+            *)
+                echo "Error: Unknown variant '$VARIANT'. Use 'manylinux' or 'musllinux'"
+                exit 1
+                ;;
+        esac
+    done
+    # Join patterns with space for CIBW_BUILD
+    CIBW_BUILD=$(IFS=' '; echo "${BUILD_PATTERNS[*]}")
+    export CIBW_BUILD
+    echo "Building for variants: ${VARIANTS[*]}"
+    echo "CIBW_BUILD pattern: $CIBW_BUILD"
+fi
 
 # Check if tmux session 'main' exists, if not create it
 if ! tmux has-session -t main 2>/dev/null; then
@@ -255,7 +300,11 @@ for ARCH in "${ARCHS[@]}"; do
     echo "Starting build for $ARCH in tmux window..."
 
     # Create a new window in the 'main' session for this architecture
-    tmux new-window -t main -n "build-$ARCH" "cd $(pwd) && CIBW_ARCHS=$ARCH cibuildwheel --platform linux; echo 'Build for $ARCH complete. Press enter to close.'; read"
+    if [ -n "$CIBW_BUILD" ]; then
+        tmux new-window -t main -n "build-$ARCH" "cd $(pwd) && CIBW_ARCHS=$ARCH CIBW_BUILD='$CIBW_BUILD' cibuildwheel --platform linux; echo 'Build for $ARCH complete. Press enter to close.'; read"
+    else
+        tmux new-window -t main -n "build-$ARCH" "cd $(pwd) && CIBW_ARCHS=$ARCH cibuildwheel --platform linux; echo 'Build for $ARCH complete. Press enter to close.'; read"
+    fi
 done
 
 echo ""

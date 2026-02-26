@@ -316,3 +316,32 @@ are [included](https://github.com/genotrance/libcurl_jll.jl). MacOS includes the
 libcurl binaries and dependencies installed via brew.
 
 [cibuildwheel](https://cibuildwheel.pypa.io/) is used to build all the artifacts.
+
+### Build script options
+
+The `build.sh` script supports the following options:
+
+```bash
+./build.sh [--force] [--docs] [--arch ARCH1,ARCH2,...] [--variant manylinux|musllinux|manylinux,musllinux]
+```
+
+- `--force`: Rebuild all wheels even if they exist
+- `--docs`: Only update documentation and exit
+- `--arch`: Comma-separated list of architectures to build (`x86_64`, `i686`, `aarch64`)
+- `--variant`: Comma-separated list of Linux variants to build (`manylinux`, `musllinux`)
+
+**Examples:**
+
+```bash
+# Build only x86_64 and aarch64 architectures
+./build.sh --arch x86_64,aarch64
+
+# Build only musllinux wheels for all architectures
+./build.sh --variant musllinux
+
+# Build x86_64 musllinux wheels only
+./build.sh --arch x86_64 --variant musllinux
+
+# Build aarch64 for both manylinux and musllinux
+./build.sh --arch aarch64 --variant manylinux,musllinux
+```

@@ -1037,19 +1037,44 @@ class MCurl:
             # Gateway timeout
             curl.resp = 504
             curl.errstr += "Operation timed out"
+        elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
+            # POST/PUT rewind not supported (#199) - retry
+            curl.resp = 503
+            curl.errstr += "Send failed rewind"
+        elif curl.cerr in [libcurl.CURLE_SSL_CONNECT_ERROR,
+                           libcurl.CURLE_PEER_FAILED_VERIFICATION,
+                           libcurl.CURLE_SSL_CERTPROBLEM,
+                           libcurl.CURLE_SSL_CACERT_BADFILE]:
+            # SSL/TLS error
+            curl.resp = 502
+            curl.errstr += "SSL error"
+        elif curl.cerr in [libcurl.CURLE_SEND_ERROR,
+                           libcurl.CURLE_RECV_ERROR,
+                           libcurl.CURLE_GOT_NOTHING]:
+            # Network error
+            curl.resp = 502
+            curl.errstr += "Network error"
+        elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
+            # Auth function error (SSPI/GSS-API failure)
+            curl.resp = 407
+            curl.errstr += "Proxy auth mechanism error"
+        elif curl.cerr == libcurl.CURLE_HTTP2:
+            # HTTP/2 framing error
+            curl.resp = 502
+            curl.errstr += "HTTP/2 error"
+        elif curl.cerr != libcurl.CURLE_OK:
+            # Unmapped libcurl error
+            curl.resp = 503
+            curl.errstr += f"Curl error {curl.cerr}"
 
-        if curl.proxy is not None:
+        # Only check proxy auth when libcurl itself succeeded - a non-OK cerr
+        # means the HTTP response code from get_response() is unreliable and
+        # must not be used to judge authentication status (px#250)
+        if curl.proxy is not None and curl.cerr == libcurl.CURLE_OK:
             ret, codep = curl.get_response()
             if ret == 0 and codep == 407:
                 # Proxy authentication required
-                if curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
-                    # Issue #199 - POST/PUT rewind not supported
-                    out = "POST/PUT rewind not supported (#199)"
-
-                    # Retry since proxy auth not cached yet
-                    curl.resp = 503
-                    curl.errstr += out + "; "
-                elif curl.auth is not None:
+                if curl.auth is not None:
                     # Proxy auth did not work for whatever reason
                     out = "Proxy authentication failed: "
                     if curl.user is not None:

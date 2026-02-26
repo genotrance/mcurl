@@ -170,7 +170,7 @@ def code_cleanup(code):
 
                     # Workaround for ~(unsigned long)
                     if spl[1].startswith("CURLAUTH_ANY"):
-                        if sys.platform == "win32":
+                        if sys.platform == "win32" or sys.maxsize <= 2**32:
                             val += 0xffffffff + 1
                         else:
                             val += 0xffffffffffffffff + 1

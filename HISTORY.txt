@@ -2,6 +2,9 @@ v8.18.0.1 - TBD
 - Dropped Python 3.8 support, added Python 3.14 support
 - Added configurable proxy authentication failure threshold with default of 3
   attempts before blocking a proxy, use set_failure_threshold() to configure
+- Fixed genotrance/Px#250 - only check proxy auth status when libcurl itself
+  succeeded, as a non-OK cerr means the HTTP response code is unreliable
+- Fixed incorrect value for CURLAUTH_ANY and CURLAUTH_ANYSAFE on i686
 
 v8.12.1.1 - 2025-03-08
 - Fixed genotrance/Px:243 - libcurl was incorrectly picking up
