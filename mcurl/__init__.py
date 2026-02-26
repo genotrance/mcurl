@@ -647,12 +647,14 @@ class Curl:
 
         # Perform as a standalone easy handle, not using multi
         # However, add easyhash to MCURL.handles since it is used in curl callbacks
-        MCURL.handles[self.easyhash] = self
+        with MCURL._lock:
+            MCURL.handles[self.easyhash] = self
         self.cerr = libcurl.curl_easy_perform(self.easy)
         if self.cerr != libcurl.CURLE_OK:
             dprint(self.easyhash + ": Connection failed: " +
                    str(self.cerr) + "; " + self.errstr)
-        MCURL.handles.pop(self.easyhash)
+        with MCURL._lock:
+            MCURL.handles.pop(self.easyhash)
         self._save_auth()
         return self.cerr
 
@@ -977,18 +979,28 @@ class MCurl:
 
     def _perform(self):
         # Perform all tasks in the multi instance
-        with self._lock:
-            rlen = len(self.rlist)
-            wlen = len(self.wlist)
-            if rlen != 0 or wlen != 0:
-                rready, wready, xready = select.select(
-                    self.rlist, self.wlist, set(self.rlist) | set(self.wlist), self.timer)
-            else:
-                rready, wready, xready = [], [], []
-                if self.timer is not None:
-                    # Sleeping within lock - needs fix
-                    time.sleep(self.timer)
 
+        # Snapshot socket lists and timer under lock
+        with self._lock:
+            rsnap = list(self.rlist)
+            wsnap = list(self.wlist)
+            timer = self.timer
+
+        # select()/sleep() outside the lock so other threads can add/remove
+        rready, wready, xready = [], [], []
+        if len(rsnap) != 0 or len(wsnap) != 0:
+            try:
+                rready, wready, xready = select.select(
+                    rsnap, wsnap, set(rsnap) | set(wsnap), timer)
+            except OSError:
+                # Socket closed between snapshot and select()
+                return
+        else:
+            if timer is not None:
+                time.sleep(timer)
+
+        # Process ready sockets under lock
+        with self._lock:
             if len(rready) == 0 and len(wready) == 0 and len(xready) == 0:
                 # dprint("No activity")
                 self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
@@ -1086,8 +1098,7 @@ class MCurl:
                     curl.errstr += out + "; "
 
                     # Increment failure count for this proxy; block after threshold attempts
-                    with self._lock:
-                        self.failed[curl.proxy] = self.failed.get(curl.proxy, 0) + 1
+                    self.failed[curl.proxy] = self.failed.get(curl.proxy, 0) + 1
                 else:
                     # Setup client to authenticate directly with upstream proxy
                     dprint(curl.easyhash +
@@ -1097,8 +1108,7 @@ class MCurl:
                         curl.resp = codep
             else:
                 # Successful (or non‑auth) response – reset failure counter for this proxy
-                with self._lock:
-                    self.failed[curl.proxy] = 0
+                self.failed[curl.proxy] = 0
 
         if curl.is_connect and curl.sock_fd is None:
             # Need sock_fd for select()
@@ -1253,9 +1263,11 @@ class MCurl:
     def close(self):
         "Stop any running transfers and close this multi handle"
         dprint("Closing multi")
-        for easyhash in tuple(self.handles):
-            self.stop(self.handles[easyhash])
-        libcurl.curl_multi_cleanup(self._multi)
+        with self._lock:
+            pending = list(self.handles.values())
+            for curl in pending:
+                self._remove_handle(curl, errstr="Stopped")
+            libcurl.curl_multi_cleanup(self._multi)
 
         global MCURL
         MCURL = None
