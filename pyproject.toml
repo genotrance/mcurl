@@ -4,7 +4,7 @@ requires = ["cffi", "jbb", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.12.1.1"
+version = "8.18.0.1"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -21,38 +21,52 @@ classifiers = [
         "Operating System :: MacOS :: MacOS X",
         "Operating System :: Microsoft :: Windows",
         "Operating System :: POSIX :: Linux",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Topic :: Internet :: WWW/HTTP"
 ]
-dependencies = ["cffi"]
-requires-python = ">=3.8"
+dependencies = ["cffi; implementation_name == 'cpython'"]
+requires-python = ">=3.9"
 
 [project.urls]
 Homepage = "https://github.com/genotrance/mcurl"
 Repository = "https://github.com/genotrance/mcurl"
 Issues = "https://github.com/genotrance/mcurl/issues"
 
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-httpbin",
+    "pytest-cov",
+    "jsonschema<4.18",
+    "pre-commit>=4.5.1; python_version >= '3.10'",
+    "mypy>=1.19.1; python_version >= '3.10'",
+    "ruff>=0.14.14; python_version >= '3.10'",
+]
+
 [tool.setuptools]
 packages = ["mcurl"]
 include-package-data = true
 
-[tool.distutils.bdist_wheel]
-py_limited_api = "cp32"
 
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
-skip = ["pp*", "*-musllinux_i686"]
+enable = ["pypy", "pypy-eol"]
+skip = ["*-musllinux_i686", "cp314t-*", "pp*-macosx_*", "pp*-win_*"]
+before-build = "rm -rf {project}/build {project}/*.so {project}/_libcurl_cffi*"
 test-requires = ["pytest", "pytest-httpbin"]
-test-command = "pytest {project}/tests/test.py"
+test-command = "pytest {project}/tests -q"
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "i686", "aarch64"]
+before-all = "if command -v yum &> /dev/null; then yum install -y libffi-devel; elif command -v apk &> /dev/null; then apk add libffi-dev; fi"
 environment = { TMP="/tmp" }
+# Pin jsonschema to avoid rpds-py (Rust, no PyPy wheel) - only needed on Linux where PyPy is built
+test-requires = ["pytest", "pytest-httpbin", "jsonschema<4.18"]
 repair-wheel-command = [
   "uv pip install jbb --system",
   "export KEY=$(python -c 'import jbb; print(jbb.get_key())')",
@@ -71,13 +85,72 @@ repair-wheel-command = [
 archs = ["AMD64"]
 # Fix setuptools to link with -lpython3 instead of -lpythonXX when using mingw32 on Windows
 # https://github.com/pypa/setuptools/issues/4224
-before-build = [
-  "uv pip install setuptools",
-  "python -c \"import setuptools; f=setuptools.__file__.replace('__init__', r'command\\build_ext'); d=open(f).read(); p=d.find('if use_stubs or os.name'); assert p!=-1, 'Failed to find use_stubs'; open(f, 'w').write(d[:p] + '    def get_libraries(self, ext): return _build_ext.get_libraries(self, ext)[:-1] + [\\'python3\\']\\n\\n' + d[p:])\""
-]
+before-build = "rm -rf {project}/build {project}/_libcurl_cffi*"
 # Build with mingw32
 config-settings = "--build-option=build --build-option=--compiler --build-option=mingw32"
 repair-wheel-command = [
   "uv pip install delvewheel jbb",
   "python -c \"import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\\\mcurl\\\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])\""
 ]
+
+[tool.mypy]
+files = ["mcurl"]
+disallow_untyped_defs = false
+no_implicit_optional = true
+check_untyped_defs = false
+warn_return_any = false
+warn_unused_ignores = true
+show_error_codes = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["mcurl.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+fix = true
+
+[tool.ruff.lint]
+select = [
+    "YTT",
+    "S",
+    "B",
+    "A",
+    "C4",
+    "T10",
+    "SIM",
+    "I",
+    "C90",
+    "E", "W",
+    "F",
+    "PGH",
+    "UP",
+    "RUF",
+    "TRY",
+]
+ignore = [
+    "E501",
+    "E731",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+# gen.py is build-time code with subprocess, eval, etc. - acceptable
+"mcurl/gen.py" = ["B006", "B904", "C901", "E721", "E722", "F841", "S102", "S110", "S112", "S307", "S602", "S603", "S607", "SIM105", "TRY002", "TRY003", "UP031", "RUF005"]
+# __init__.py has complex proxy/tunnel logic and cffi patterns - acceptable
+"mcurl/__init__.py" = ["B904", "C901", "F401", "F841", "RUF003", "SIM102", "SIM108", "SIM210", "TRY002", "TRY003", "TRY201", "UP031"]
+
+[tool.ruff.format]
+preview = true
+
+[tool.coverage.report]
+skip_empty = true
+
+[tool.coverage.run]
+branch = true
+source = ["mcurl"]

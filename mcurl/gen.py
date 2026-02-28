@@ -1,12 +1,13 @@
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
-
-import jbb
+import tempfile
 
 import cffi
+import jbb
 
 # Platform specific additions
 if sys.platform == "linux":
@@ -24,10 +25,7 @@ typedef long time_t;
 typedef struct {
     long %s int fds_bits[%d];
 } fd_set;
-""" % (
-        "unsigned" if jbb.get_libc() == "musl" else "",
-        16 if sys.maxsize > 2**32 else 32
-    )
+""" % ("unsigned" if jbb.get_libc() == "musl" else "", 16 if sys.maxsize > 2**32 else 32)
 
     HEADER = """
 #include <sys/socket.h>
@@ -87,10 +85,7 @@ extern "Python" size_t header_callback(char *buffer, size_t size, size_t nitems,
 extern "Python" int wa_callback (CURL * handle, curl_infotype type, char *data, size_t size, void *userptr);
 """
 
-FILTERS = [
-    "va_list",
-    "__asm__"
-]
+FILTERS = ["va_list", "__asm__", "CURL_HAS_DECLSPEC_ATTRIBUTE"]
 
 DEFINES = {}
 
@@ -157,6 +152,9 @@ def code_cleanup(code):
                             if key in spl[2]:
                                 spl[2] = spl[2].replace(key, str(DEFINES[key]))
 
+                    # Replace instances of \d+L with \d+
+                    spl[2] = re.sub(r"(\d+)L\b", r"\1", spl[2])
+
                     # Evaluate value in Python - works for bit shifts, |, etc.
                     try:
                         val = eval(spl[2])
@@ -165,10 +163,10 @@ def code_cleanup(code):
 
                     # Workaround for ~(unsigned long)
                     if spl[1].startswith("CURLAUTH_ANY"):
-                        if sys.platform == "win32":
-                            val += 0xffffffff + 1
+                        if sys.platform == "win32" or sys.maxsize <= 2**32:
+                            val += 0xFFFFFFFF + 1
                         else:
-                            val += 0xffffffffffffffff + 1
+                            val += 0xFFFFFFFFFFFFFFFF + 1
 
                 if type(val) in [int, float]:
                     line = f"#define {spl[1]} {val}"
@@ -188,9 +186,16 @@ def gen_callbacks(code):
     callbacks = ""
     for line in code.splitlines():
         if line.startswith("typedef") and "(*" in line and "_callback" in line:
-            callbacks += (line.replace("typedef", "extern \"Python\"")
-                          .replace("(*curl_", "", 1).replace("(*_curl", "")
-                          .replace(")", "", 1) + "\n")
+            callbacks += (
+                line
+                .replace("typedef", 'extern "Python"')
+                .replace("(*curl_", "", 1)
+                .replace("(*_curl", "")
+                .replace("(*Wcurl_", "", 1)
+                .replace("(*_Wcurl", "")
+                .replace(")", "", 1)
+                + "\n"
+            )
 
     return callbacks
 
@@ -217,13 +222,19 @@ def get_preprocessor(sfile, incs=[], defines=[], recurse=False):
         args.append(f"-D{hdef}")
 
     # Remove gcc special calls
-    args.extend(['"-D__attribute__(x)="', "-D__restrict=",
-                 "-D__restrict__=", "-D__extension__=", "-D__inline__=inline",
-                 "-D__inline=inline", "-D_Noreturn=", f"{sfile}"])
+    args.extend([
+        '"-D__attribute__(x)="',
+        "-D__restrict=",
+        "-D__restrict__=",
+        "-D__extension__=",
+        "-D__inline__=inline",
+        "-D__inline=inline",
+        "-D_Noreturn=",
+        f"{sfile}",
+    ])
 
     # Run preprocessor
-    p = subprocess.run(" ".join(args), capture_output=True,
-                       text=True, shell=True)
+    p = subprocess.run(" ".join(args), capture_output=True, text=True, shell=True)
     outp = p.stdout.replace("\\\\", os.sep).splitlines()
     if len(p.stderr) != 0:
         print(p.stderr)
@@ -233,14 +244,14 @@ def get_preprocessor(sfile, incs=[], defines=[], recurse=False):
     code = ""
     for line in outp:
         # We want to keep blank lines here for comment processing
-        if len(line) > 10 and line[0] == '#' and line[1] == ' ' and '"' in line:
+        if len(line) > 10 and line[0] == "#" and line[1] == " " and '"' in line:
             # # 1 "path/to/file.h" 1
             start = False
             line = line.split('"')[1]
             if sfile == line or (os.path.sep not in line and sfileName == line):
                 start = True
             elif recurse:
-                if (len(pDir) == 0 or pDir in line):
+                if len(pDir) == 0 or pDir in line:
                     start = True
                 else:
                     for inc in includeDirs:
@@ -249,8 +260,11 @@ def get_preprocessor(sfile, incs=[], defines=[], recurse=False):
                             if start:
                                 break
         elif ": fatal error:" in line:
-            raise Exception("Failed in preprocessing, check if `incs` is needed or compiler `mode` is correct (c/cpp)" +
-                            "\n\nERROR:" + line.split(": fatal error:")[1])
+            raise Exception(
+                "Failed in preprocessing, check if `incs` is needed or compiler `mode` is correct (c/cpp)"
+                + "\n\nERROR:"
+                + line.split(": fatal error:")[1]
+            )
         else:
             if start:
                 if "#undef" in line:
@@ -274,7 +288,7 @@ def get_preprocessor(sfile, incs=[], defines=[], recurse=False):
 
 def get_libcurl_version():
     # Get module version from pyproject.toml
-    with open("pyproject.toml", "r") as f:
+    with open("pyproject.toml") as f:
         toml = f.read()
     for line in toml.splitlines():
         if line.startswith("version"):
@@ -288,36 +302,74 @@ def get_libcurl_version():
     return version[:lastdot]
 
 
+def _use_stable_abi():
+    # Detect whether we can use the stable/limited API
+    # - PyPy does not honour Py_LIMITED_API
+    # - Free-threaded CPython is incompatible with Py_LIMITED_API
+    import sysconfig as _sc
+
+    _is_cpython = sys.implementation.name == "cpython"
+    _ext_suffix = _sc.get_config_var("EXT_SUFFIX") or ""
+    _freethreaded = (
+        bool(_sc.get_config_var("Py_GIL_DISABLED"))
+        or "t-" in _ext_suffix
+        or getattr(sys, "_is_gil_enabled", lambda: True)() is False
+    )
+    return _is_cpython and not _freethreaded
+
+
 def cffi_prep(cdef, inc, libs):
     # Build with cffi
     ffibuilder = cffi.FFI()
     ffibuilder.cdef(CDEF_HEADER + cdef)
-    ffibuilder.set_source("_libcurl_cffi", HEADER, libraries=["curl"],
-                          library_dirs=libs, include_dirs=[inc],
-                          define_macros=[("CURL_DISABLE_DEPRECATION", None)])
+    define_macros = [("CURL_DISABLE_DEPRECATION", None)]
+    extra_compile_args = []
+    extra_link_args = []
+    if sys.platform == "darwin":
+        # Embed rpaths for all brew lib dirs so the extension finds
+        # libcurl at runtime regardless of the active Python interpreter
+        # (CPython, PyPy) without requiring DYLD_LIBRARY_PATH.
+        for lib in libs:
+            extra_link_args.append(f"-Wl,-rpath,{lib}")
+    ffibuilder.set_source(
+        "_libcurl_cffi",
+        HEADER,
+        libraries=["curl"],
+        library_dirs=libs,
+        include_dirs=[inc],
+        define_macros=define_macros,
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+        py_limited_api=_use_stable_abi(),
+    )
     return ffibuilder
 
 
 def source_prep():
     # Download libcurl from JBB for Linux and Windows
     key = jbb.get_key()
-    outdir = f"{os.environ['TMP']}{os.sep}mcurl{os.sep}{key}"
+    outdir = os.path.join(os.environ.get("TMP", tempfile.gettempdir()), "mcurl", key)
     version = get_libcurl_version()
     libs = []
     if sys.platform != "darwin":
-        libs.extend(
-            jbb.jbb(f"LibCURL-v{version}", outdir=outdir,
-                    project="genotrance", quiet=False)
-        )
+        libs.extend(jbb.jbb(f"LibCURL-v{version}", outdir=outdir, project="genotrance", quiet=False))
+
+        # On Windows, jbb returns bin/ dirs but mingw32 linker needs lib/ dirs
+        # for import libraries (.dll.a / .a). Add lib/ equivalents.
+        if sys.platform == "win32":
+            lib_dirs = []
+            for d in libs:
+                lib_dirs.append(d)
+                lib_dir = d.replace(os.sep + "bin", os.sep + "lib")
+                if lib_dir != d and os.path.isdir(lib_dir):
+                    lib_dirs.append(lib_dir)
+            libs = lib_dirs
 
         # Header file location
         curlh = f"{outdir}{os.sep}LibCURL{os.sep}include{os.sep}curl{os.sep}curl.h"
     else:
-        prefix = subprocess.check_output(
-            "brew --prefix", shell=True, text=True).strip()
-        deps = ["curl"] + subprocess.check_output(
-            "brew deps -n --installed curl", shell=True, text=True
-        ).splitlines()
+        prefix = subprocess.check_output("brew --prefix", shell=True, text=True).strip()
+        deps = ["curl"] + subprocess.check_output("brew deps -n --installed curl", shell=True, text=True).splitlines()
         for dep in deps:
             if dep == "ca-certificates":
                 continue
@@ -327,12 +379,6 @@ def source_prep():
 
     # Include directory
     inc = os.path.dirname(curlh)
-
-    if sys.platform == "win32":
-        # Copy libcurl-4.dll to libcurl.dll
-        if not os.path.exists(f"{libs[0]}/libcurl.dll"):
-            lcdll = glob.glob(f"{libs[0]}/libcurl-*.dll")[0]
-            shutil.copy(lcdll, f"{libs[0]}/libcurl.dll")
 
     # Download CAcerts
     pemdst = "mcurl/cacert.pem"
@@ -368,5 +414,5 @@ def main():
     builder.compile(verbose=True)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

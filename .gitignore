@@ -3,8 +3,33 @@
 build/
 dist/
 wheel/
-wheelhouse/
+wheelhouse*/
 __pycache__/
 mcurllib/
 *.h
 *.pem
+*.so
+*.o
+
+# Virtual environments
+.venv/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# pytest
+.pytest_cache/
+
+# uv
+uv.lock
+
+# Pre-commit
+.pre-commit-config.yaml.bak
