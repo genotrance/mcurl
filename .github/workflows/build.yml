@@ -1,0 +1,151 @@
+name: Build wheels
+
+on:
+  push:
+    branches:
+      - main
+      - devel
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        run: |
+          # Get latest LibCURL_jll.jl release and extract base version
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
+          BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
+
+          if [ -z "$BASE_VERSION" ] || ! [[ "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Warning: Failed to parse version from $LATEST_RELEASE, using pyproject.toml"
+            VERSION=$(python3 -c "import re, pathlib; text = pathlib.Path('pyproject.toml').read_text(); m = re.search(r'version = \"(.+?)\"', text); print(m.group(1))")
+          else
+            echo "Latest LibCURL: $BASE_VERSION"
+            CURRENT_VER=$(python3 -c "import re, pathlib; text = pathlib.Path('pyproject.toml').read_text(); m = re.search(r'version = \"(.+?)\"', text); print(m.group(1))")
+            CURRENT_BASE="${CURRENT_VER%.*}"
+            if [ "$CURRENT_BASE" = "$BASE_VERSION" ]; then
+              VERSION="$CURRENT_VER"
+            else
+              VERSION="${BASE_VERSION}.1"
+            fi
+          fi
+
+          PUBLISH="false"
+          if [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
+            PUBLISH="true"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "publish=$PUBLISH" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION, Publish: $PUBLISH"
+
+  build-sdist:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set version
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ needs.setup.outputs.version }}\"/" pyproject.toml
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    needs: setup
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            cibw_archs: x86_64
+          - os: ubuntu-latest
+            arch: i686
+            cibw_archs: i686
+          - os: ubuntu-latest
+            arch: aarch64
+            cibw_archs: aarch64
+          - os: windows-latest
+            arch: x86_64
+            cibw_archs: AMD64
+          - os: macos-14
+            arch: arm64
+            cibw_archs: arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set version
+        shell: bash
+        run: |
+          sed -i.bak "s/^version = \".*\"/version = \"${{ needs.setup.outputs.version }}\"/" pyproject.toml
+
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.3.1
+        env:
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  publish:
+    needs: [setup, build-sdist, build-wheels]
+    if: needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="v${{ needs.setup.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi

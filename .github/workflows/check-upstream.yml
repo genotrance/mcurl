@@ -1,0 +1,61 @@
+name: Check upstream LibCURL
+
+on:
+  schedule:
+    # Check monthly on the 1st at 06:00 UTC
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: current
+        run: |
+          CURRENT_VER=$(python3 -c "
+          import re, pathlib
+          text = pathlib.Path('pyproject.toml').read_text()
+          m = re.search(r'version = \"(.+?)\"', text)
+          print(m.group(1))
+          ")
+          CURRENT_BASE="${CURRENT_VER%.*}"
+          echo "base=$CURRENT_BASE" >> $GITHUB_OUTPUT
+          echo "Current base version: $CURRENT_BASE"
+
+      - name: Get latest upstream version
+        id: upstream
+        run: |
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
+          BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
+          echo "base=$BASE_VERSION" >> $GITHUB_OUTPUT
+          echo "Latest upstream: $BASE_VERSION (from $LATEST_RELEASE)"
+
+      - name: Check if update needed
+        id: check
+        run: |
+          if [ "${{ steps.current.outputs.base }}" = "${{ steps.upstream.outputs.base }}" ]; then
+            echo "needed=false" >> $GITHUB_OUTPUT
+            echo "Already up to date with ${{ steps.upstream.outputs.base }}"
+          else
+            echo "needed=true" >> $GITHUB_OUTPUT
+            echo "New upstream version available: ${{ steps.upstream.outputs.base }}"
+          fi
+
+      - name: Trigger build
+        if: steps.check.outputs.needed == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build.yml',
+              ref: 'main',
+            });

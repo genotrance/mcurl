@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - devel
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Set up the environment
+        uses: ./.github/actions/setup-python-env
+
+      - name: Run checks
+        run: make check
+
+  tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "pypy3.10", "pypy3.11"]
+        exclude:
+          - os: macos-latest
+            python-version: "pypy3.10"
+          - os: macos-latest
+            python-version: "pypy3.11"
+      fail-fast: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up the environment
+        uses: ./.github/actions/setup-python-env
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set LD_LIBRARY_PATH for jbb libcurl (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          LIB_DIRS=$(uv run python -m jbb -d "$RUNNER_TEMP/mcurl/$(uv run python -c 'import jbb; print(jbb.get_key())')" -q LibCURL)
+          echo "LD_LIBRARY_PATH=${LIB_DIRS}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Set DYLD_LIBRARY_PATH for brew libcurl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          PREFIX=$(brew --prefix)
+          DIRS=$(brew deps -n --installed curl | grep -v ca-certificates | xargs -I{} echo "${PREFIX}/opt/{}/lib" | tr '\n' ':')${PREFIX}/opt/curl/lib
+          echo "DYLD_LIBRARY_PATH=${DIRS}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: uv run python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
+
+  tests-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build and test wheels (Windows)
+        uses: pypa/cibuildwheel@v3.3.1
+        env:
+          CIBW_ARCHS: AMD64
+          CIBW_BUILD: "cp312-win_amd64"
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            uv pip install delvewheel jbb &&
+            python -c "import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\mcurl\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])"
+          CIBW_TEST_REQUIRES: "pytest pytest-httpbin"
+          CIBW_TEST_COMMAND: "pytest {project}/tests -q"

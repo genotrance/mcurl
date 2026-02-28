@@ -1,13 +1,14 @@
-Manage outbound HTTP connections using Curl & CurlMulti
+# mcurl
 
-### Description
+[![Build status](https://img.shields.io/github/actions/workflow/status/genotrance/mcurl/main.yml?branch=main)](https://github.com/genotrance/mcurl/actions/workflows/main.yml?query=branch%3Amain)
+[![PyPI version](https://img.shields.io/pypi/v/pymcurl)](https://pypi.org/project/pymcurl/)
+[![License](https://img.shields.io/github/license/genotrance/mcurl)](https://github.com/genotrance/mcurl/blob/main/LICENSE.txt)
 
-mcurl is a Python wrapper for [libcurl](https://curl.haxx.se/libcurl/) with a
-high-level API that makes it easy to interact with the libcurl easy and multi
-interfaces. It was originally created for the [Px](https://github.com/genotrance/px)
-proxy server which uses libcurl to handle upstream proxy authentication.
+Python wrapper for [libcurl](https://curl.haxx.se/libcurl/) with a high-level
+API for the easy and multi interfaces. Originally created for the
+[Px](https://github.com/genotrance/px) proxy server.
 
-### Usage
+## Installation
 
 mcurl can be installed using pip:
 
@@ -15,26 +16,28 @@ mcurl can be installed using pip:
 pip install pymcurl
 ```
 
-Binary [packages](https://pypi.org/project/pymcurl) are provided the following platforms:
+Binary [packages](https://pypi.org/project/pymcurl) are provided for the following platforms:
 - aarch64-linux-gnu
 - aarch64-linux-musl
 - arm64-mac
 - i686-linux-gnu
 - x86_64-linux-gnu
 - x86_64-linux-musl
-- x86_64-macos
 - x86_64-windows
 
 mcurl leverages [cffi](https://pypi.org/project/cffi) to interface with libcurl
 and all binary dependencies are sourced from [binarybuilder.org](https://binarybuilder.org/).
-auditwheel on Linux, delocate on MacOS and delvewheel on Windows are used to bundle
+auditwheel on Linux, delocate on macOS and delvewheel on Windows are used to bundle
 the shared libraries into the wheels.
 
 Thanks to [cffi](https://cffi.readthedocs.io/en/latest/cdef.html#ffibuilder-compile-etc-compiling-out-of-line-modules)
 and [Py_LIMITED_API](https://docs.python.org/3/c-api/stable.html#limited-c-api),
-these mcurl binaries should work on any Python from v3.2 onwards.
+the CPython wheel works on any CPython ≥ 3.9. Separate wheels are provided for
+PyPy.
 
-#### Easy interface
+## Usage
+
+### Easy interface
 
 ```python
 import mcurl
@@ -52,7 +55,7 @@ if ret == 0:
     print(f"Response: {resp}\n\n{headers}{data}")
 ```
 
-#### Multi interface
+### Multi interface
 
 ```python
 import mcurl
@@ -77,18 +80,12 @@ ret1 = m.do(c1)
 ret2 = m.do(c2)
 
 if ret1:
-    c1.get_response()
-    c1.get_headers()
-    c1.get_data()
     print(f"Response: {c1.get_response()}\n\n" +
           f"{c1.get_headers()}{c1.get_data()}")
 else:
     print(f"Failed with error: {c1.errstr}")
 
 if ret2:
-    c2.get_response()
-    c2.get_headers()
-    c2.get_data()
     print(f"Response: {c2.get_response()}\n\n" +
           f"{c2.get_headers()}{c2.get_data()}")
 else:
@@ -97,10 +94,9 @@ else:
 m.close()
 ```
 
-#### libcurl API
+### Raw libcurl API
 
-The [libcurl API](https://curl.se/libcurl/c/) can be directly accessed as is done
-in [mcurl](mcurl/__init__.py) if preferred.
+The [libcurl C API](https://curl.se/libcurl/c/) can also be accessed directly:
 
 ```python
 from _libcurl_cffi import lib as libcurl
@@ -114,211 +110,109 @@ libcurl.curl_easy_setopt(easy, libcurl.CURLOPT_URL, curl)
 cerr = libcurl.curl_easy_perform(easy)
 ```
 
-#### API reference
+## Threading
 
-```
-NAME
-    mcurl - Manage outbound HTTP connections using Curl & CurlMulti
+Each `MCurl` instance manages its own curl multi handle with internal locking for thread-safe concurrent operations. Multiple threads can safely call `add()`, `do()`, `remove()`, and `stop()` on the same `MCurl` instance.
 
-CLASSES
-    builtins.object
-        Curl
-        MCurl
+**Recommended patterns:**
 
-    class Curl(builtins.object)
-     |  Curl(url, method='GET', request_version='HTTP/1.1', connect_timeout=60)
-     |
-     |  Helper class to manage a curl easy instance
-     |
-     |  Methods defined here:
-     |
-     |  __del__(self)
-     |      Destructor - clean up resources
-     |
-     |  __init__(self, url, method='GET', request_version='HTTP/1.1', connect_timeout=60)
-     |      Initialize curl instance
-     |
-     |      method = GET, POST, PUT, CONNECT, etc.
-     |      request_version = HTTP/1.0, HTTP/1.1, etc.
-     |
-     |  bridge(self, client_rfile=None, client_wfile=None, client_hfile=None)
-     |      Bridge curl reads/writes to sockets specified
-     |
-     |      Reads POST/PATCH data from client_rfile
-     |      Writes data back to client_wfile
-     |      Writes headers back to client_hfile
-     |
-     |  buffer(self, data=None)
-     |      Setup buffers to bridge curl perform
-     |
-     |  get_activesocket(self)
-     |      Return active socket for this easy instance
-     |
-     |  get_data(self, encoding='utf-8')
-     |      Return data written by curl perform to buffer()
-     |
-     |      encoding = "utf-8" by default, change or set to None if bytes preferred
-     |
-     |  get_headers(self, encoding='utf-8')
-     |      Return headers written by curl perform to buffer()
-     |
-     |      encoding = "utf-8" by default, change or set to None if bytes preferred
-     |
-     |  get_primary_ip(self)
-     |      Return primary IP address of this easy instance
-     |
-     |  get_proxyauth_used(self)
-     |      Return which proxy auth method was used for this easy instance
-     |
-     |  get_response(self)
-     |      Return response code of completed request
-     |
-     |  get_used_proxy(self)
-     |      Return whether proxy was used for this easy instance
-     |
-     |  perform(self)
-     |      Perform the easy handle
-     |
-     |  reset(self, url, method='GET', request_version='HTTP/1.1', connect_timeout=60)
-     |      Reuse existing curl instance for another request
-     |
-     |  set_auth(self, user, password=None, auth='ANY')
-     |      Set proxy authentication info - call after set_proxy() to enable auth caching
-     |
-     |  set_debug(self, enable=True)
-     |      Enable debug output
-     |
-     |  set_follow(self, enable=True)
-     |      Set curl to follow 3xx responses
-     |
-     |  set_headers(self, xheaders)
-     |      Set headers to send
-     |
-     |  set_insecure(self, enable=True)
-     |      Set curl to ignore SSL errors
-     |
-     |  set_proxy(self, proxy, port=0, noproxy=None)
-     |      Set proxy options - returns False if this proxy server has auth failures
-     |
-     |  set_transfer_decoding(self, enable=False)
-     |      Set curl to turn off transfer decoding - let client do it
-     |
-     |  set_tunnel(self, tunnel=True)
-     |      Set to tunnel through proxy if no proxy or proxy + auth
-     |
-     |  set_useragent(self, useragent)
-     |      Set user agent to send
-     |
-     |  set_verbose(self, enable=True)
-     |      Set verbose mode
-     |
+- **MCurl per thread** — create a separate `MCurl` in each thread for maximum parallelism:
 
-    class MCurl(builtins.object)
-     |  MCurl(debug_print=None)
-     |
-     |  Helper class to manage a curl multi instance
-     |
-     |  Methods defined here:
-     |
-     |  __init__(self, debug_print=None)
-     |      Initialize multi interface
-     |
-     |  add(self, curl: mcurl.Curl)
-     |      Add a Curl handle to perform
-     |
-     |  close(self)
-     |      Stop any running transfers and close this multi handle
-     |
-     |  do(self, curl: mcurl.Curl)
-     |      Add a Curl handle and peform until completion
-     |
-     |  remove(self, curl: mcurl.Curl)
-     |      Remove a Curl handle once done
-     |
-     |  select(self, curl: mcurl.Curl, client_sock, idle=30)
-     |      Run select loop between client and curl
-     |
-     |  setopt(self, option, value)
-     |      Configure multi options
-     |
-     |  stop(self, curl: mcurl.Curl)
-     |      Stop a running curl handle and remove
+  ```python
+  import threading, mcurl
 
-FUNCTIONS
-    curl_version()
-        Get curl version as numeric representation
+  def worker(url):
+      m = mcurl.MCurl()
+      c = mcurl.Curl(url)
+      c.buffer()
+      m.do(c)
+      print(c.get_data())
+      m.close()
 
-    cvp2pystr(cvoidp)
-        Convert void * to Python string
+  threads = [threading.Thread(target=worker, args=(f"http://httpbin.org/get?id={i}",)) for i in range(4)]
+  for t in threads: t.start()
+  for t in threads: t.join()
+  ```
 
-    debug_callback(easy, infotype, data, size, userp)
-        Prints out curl debug info and headers sent/received
+- **Shared MCurl** — multiple threads can share one `MCurl` instance (internally locked):
 
-    dprint(_)
+  ```python
+  m = mcurl.MCurl()
 
-    get_curl_features()
-        Get all supported feature names from version info data
+  def worker(url):
+      c = mcurl.Curl(url)
+      c.buffer()
+      m.do(c)
+      print(c.get_data())
+      m.remove(c)
 
-    get_curl_vinfo()
-        Get curl version info data
+  threads = [threading.Thread(target=worker, args=(f"http://httpbin.org/get?id={i}",)) for i in range(4)]
+  for t in threads: t.start()
+  for t in threads: t.join()
+  m.close()
+  ```
 
-    getauth(auth)
-        Return auth value for specified authentication string
+## Versioning
 
-        Supported values can be found here: https://curl.se/libcurl/c/CURLOPT_HTTPAUTH.html
+Version format is `X.Y.Z.P` where `X.Y.Z` matches the upstream libcurl version and `P` is the wrapper patch (starts at 1 per upstream release). Wheels are built automatically when a new [LibCURL_jll.jl](https://github.com/genotrance/LibCURL_jll.jl) release is detected.
 
-        Skip the CURLAUTH_ portion in input - e.g. getauth("ANY")
+## Documentation
 
-        To control which methods are available during proxy detection:
-          Prefix NO to avoid method - e.g. NONTLM => ANY - NTLM
-          Prefix SAFENO to avoid method - e.g. SAFENONTLM => ANYSAFE - NTLM
-          Prefix ONLY to support only that method - e.g ONLYNTLM => ONLY + NTLM
+See the [`docs/`](docs/) folder for detailed documentation:
 
-    gethash(easy)
-        Return hash value for easy to allow usage as a dict key
+- [**Build system**](docs/build.md) — `pyproject.toml`, `setup.py`, cffi, cibuildwheel, wheel matrix
+- [**CI & GitHub Actions**](docs/ci.md) — workflows, deployment flow
+- [**API reference**](docs/api.md) — `Curl`, `MCurl`, utility functions
+- [**Changelog**](docs/changelog.md) — release history
+- [**Testing**](docs/testing.md) — test layout, running tests, fixtures
 
-    header_callback(buffer, size, nitems, userdata)
+## Development
 
-    multi_timer_callback(multi, timeout_ms, userp)
+Requires a C compiler and [uv](https://docs.astral.sh/uv/).
 
-    print_curl_version()
-        Display curl version information
-
-    py2cbool(pbool)
-        Convert Python bool to long
-
-    py2clong(plong)
-        Convert Python int to long
-
-    py2cstr(pstr)
-        Convert Python string to char *
-
-    py2custr(pstr)
-        Convert Python string to char *
-
-    read_callback(buffer, size, nitems, userdata)
-
-    sanitized(msg)
-        Hide user sensitive data from debug output
-
-    socket_callback(easy, sock_fd, ev_bitmask, userp, socketp)
-
-    sockopt_callback(clientp, sock_fd, purpose)
-
-    write_callback(buffer, size, nitems, userdata)
-
-    yield_msgs(data, size)
-        Generator for curl debug messages
-
+```bash
+git clone https://github.com/genotrance/mcurl.git
+cd mcurl
+make install
+make test
 ```
 
-### Building mcurl
+| Target         | Description                                        |
+|----------------|----------------------------------------------------|
+| `make install` | Create venv, build C extension, install pre-commit |
+| `make test`    | Run tests with coverage                            |
+| `make check`   | Run linters and type checking                      |
+| `make build`   | Build sdist and wheel                              |
+| `make clean`   | Remove build artifacts                             |
+| `make env`     | Print LD_LIBRARY_PATH for local development        |
 
-mcurl is built using gcc on Linux, clang on MacOS and mingw-x64 on Windows. The
+## Contributing
+
+Bug reports and pull requests are welcome at <https://github.com/genotrance/mcurl/issues>.
+
+1. Fork and clone the repository.
+2. Run `make install` to set up the venv, build the C extension, and install pre-commit hooks.
+3. Create a feature branch, make changes, add tests in `tests/`.
+4. Run `make check && make test` — all checks must pass.
+5. Open a pull request. CI runs on Ubuntu, Windows, and macOS across Python 3.9–3.14 and PyPy 3.10/3.11.
+
+## Building
+
+mcurl is built using gcc on Linux, clang on macOS and mingw-x64 on Windows. The
 shared libraries are downloaded from [binarybuilder.org](https://binarybuilder.org/)
-using [jbb](https://pypi.org/projects/jbb) for Linux and Windows. Custom libcurl
+using [jbb](https://pypi.org/project/jbb) for Linux and Windows. Custom libcurl
 binaries that include `kerberos` support on Linux and remove the `libssh2` dependency
-are [included](https://github.com/genotrance/libcurl_jll.jl). MacOS includes the
-libcurl binaries and dependencies installed via brew.
+are [available](https://github.com/genotrance/LibCURL_jll.jl). macOS uses the
+libcurl binaries and dependencies installed via Homebrew.
 
-[cibuildwheel](https://cibuildwheel.pypa.io/) is used to build all the artifacts.
+[cibuildwheel](https://cibuildwheel.pypa.io/) is used to build wheels for all
+platforms and architectures via GitHub Actions. See [docs/build.md](docs/build.md)
+for details.
+
+## Acknowledgments
+
+The modernization of this project — including expanded test suite, CI/CD infrastructure, and comprehensive documentation — was developed with the assistance of LLMs.
+
+## License
+
+MIT
