@@ -76,7 +76,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v3.3.1
+        uses: pypa/cibuildwheel@v3.4.0
         env:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: "cp312-win_amd64"
