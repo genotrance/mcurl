@@ -1,5 +1,6 @@
 """Manage outbound HTTP connections using Curl & CurlMulti"""
 
+import collections
 import io
 import os.path
 import platform
@@ -124,13 +125,10 @@ def getauth(auth):
 
 def yield_msgs(data, size):
     "Generator for curl debug messages"
-    msgs = bytes(ffi.string(data)[:size]).decode("utf-8").strip()
-    if "\r\n" in msgs:
-        for msg in msgs.split("\r\n"):
-            if len(msg) != 0:
-                yield msg
-    elif len(msgs) != 0:
-        yield msgs
+    raw = ffi.string(data)[:size]
+    for line in raw.split(b"\r\n"):
+        if line and not line.isspace():
+            yield line.decode("utf-8")
 
 
 @ffi.def_extern()
@@ -705,20 +703,16 @@ def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
     del easy, userp, socketp
     if ev_bitmask & libcurl.CURL_POLL_IN or ev_bitmask & libcurl.CURL_POLL_INOUT:
         # dprint("Read sock_fd %d" % sock_fd)
-        if sock_fd not in MCURL.rlist:
-            MCURL.rlist.append(sock_fd)
+        MCURL.rlist.add(sock_fd)
 
     if ev_bitmask & libcurl.CURL_POLL_OUT or ev_bitmask & libcurl.CURL_POLL_INOUT:
         # dprint("Write sock_fd %d" % sock_fd)
-        if sock_fd not in MCURL.wlist:
-            MCURL.wlist.append(sock_fd)
+        MCURL.wlist.add(sock_fd)
 
     if ev_bitmask & libcurl.CURL_POLL_REMOVE:
         # dprint("Remove sock_fd %d" % sock_fd)
-        if sock_fd in MCURL.rlist:
-            MCURL.rlist.remove(sock_fd)
-        if sock_fd in MCURL.wlist:
-            MCURL.wlist.remove(sock_fd)
+        MCURL.rlist.discard(sock_fd)
+        MCURL.wlist.discard(sock_fd)
 
     return libcurl.CURLE_OK
 
@@ -744,11 +738,10 @@ def get_curl_vinfo():
 def get_curl_features():
     "Get all supported feature names from version info data"
     vinfo = get_curl_vinfo()
-    features = []
+    features = set()
     i = 0
     while vinfo.feature_names[i] != ffi.NULL:
-        feature = ffi.string(vinfo.feature_names[i]).decode("utf-8")
-        features.append(feature)
+        features.add(ffi.string(vinfo.feature_names[i]).decode("utf-8"))
         i += 1
     return features
 
@@ -815,8 +808,8 @@ class MCurl:
         self.proxyauth = {}
         self.failed = {}
         self.failure_threshold = 3
-        self.rlist = []
-        self.wlist = []
+        self.rlist = set()
+        self.wlist = set()
         self._lock = threading.Lock()
 
     def setopt(self, option, value):
@@ -915,15 +908,17 @@ class MCurl:
 
         # Snapshot socket lists and timer under lock
         with self._lock:
-            rsnap = list(self.rlist)
-            wsnap = list(self.wlist)
+            rsnap_set = set(self.rlist)
+            wsnap_set = set(self.wlist)
             timer = self.timer
 
+        rsnap = list(rsnap_set)
+        wsnap = list(wsnap_set)
         # select()/sleep() outside the lock so other threads can add/remove
         rready, wready, xready = [], [], []
         if len(rsnap) != 0 or len(wsnap) != 0:
             try:
-                rready, wready, xready = select.select(rsnap, wsnap, set(rsnap) | set(wsnap), timer)
+                rready, wready, xready = select.select(rsnap, wsnap, list(rsnap_set | wsnap_set), timer)
             except OSError:
                 # Socket closed between snapshot and select()
                 return
@@ -1090,8 +1085,8 @@ class MCurl:
         # data to be written to client connection and proxy socket
         cl = 0
         cs = 0
-        cdata = []
-        sdata = []
+        cdata = collections.deque()
+        sdata = collections.deque()
         max_idle = time.time() + idle
         while rlist or wlist:
             (ins, outs, exs) = select.select(rlist, wlist, rlist, idle)
@@ -1156,7 +1151,7 @@ class MCurl:
                             if o not in wlist:
                                 wlist.append(o)
                         else:
-                            wdata.pop(0)
+                            wdata.popleft()
                             if not data and o in wlist:
                                 wlist.remove(o)
                         cs += bsnt

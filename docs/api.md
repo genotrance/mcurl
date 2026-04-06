@@ -11,8 +11,8 @@ Get curl version as numeric representation (e.g. `0x081300` for 8.19.0).
 Get the raw `curl_version_info_data` struct from libcurl.
 
 ### `get_curl_features()`
-Get all supported feature names from version info data. Returns a list of
-strings (e.g. `["SSL", "SPNEGO", "Kerberos", ...]`).
+Get all supported feature names from version info data. Returns a set of
+strings (e.g. `{"SSL", "SPNEGO", "Kerberos", ...}`).
 
 ### `print_curl_version()`
 Display curl version information via `dprint()`.

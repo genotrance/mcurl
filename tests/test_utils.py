@@ -39,7 +39,7 @@ def test_libcurl_version_matches_pyproject():
 def test_curl_features():
     # get_curl_features() returns a list containing SSL
     features = mcurl.get_curl_features()
-    assert isinstance(features, list) and len(features) > 0, "No features"
+    assert isinstance(features, (list, set)) and len(features) > 0, "No features"
     assert "SSL" in features, f"SSL not in features: {features}"
 
 
