@@ -17,6 +17,12 @@
 - Update `docs/ci.md` when workflows change, `docs/build.md` when the build system changes, and `docs/testing.md` when test structure changes.
 - Docs should explain **what was done and why** so they serve as a future reference of how the project evolved. Do not copy file contents (config snippets, YAML, TOML) verbatim into docs — refer to files by name and describe the intent instead.
 
+## Changelog
+
+- `docs/changelog.md` is only for user-facing mcurl functionality changes (new features, bug fixes, improvements).
+- Do not add CI, build system, tooling, test infrastructure, or other internal changes to the changelog.
+- Keep entries concise and focused on what changed for users of the library.
+
 ## Scope discipline
 
 - Do not remove any capability or support unless explicitly asked by the user.

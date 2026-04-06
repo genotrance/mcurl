@@ -2,7 +2,16 @@
 
 ---
 
-## v8.18.0.1 — TBD
+## v8.19.0.1 — TBD
+
+- Updated to libcurl v8.19.0.
+- Fixed cffi build failure on macOS caused by curl 8.19.0 changing
+  `CURLAUTH_ANY` / `CURLAUTH_ANYSAFE` macros to use an explicit
+  `((unsigned long)0xffffffff)` mask.
+
+---
+
+## v8.18.0.1 — 2026-02-28
 
 ### Breaking changes
 - Dropped Python 3.8 support; minimum is now Python 3.9.

@@ -120,9 +120,9 @@ PyPy version (Linux only).
 |----------|------|:--------------:|:-----------:|-------|
 | Linux (glibc) | x86_64 | 1 (abi3) | 2 (pypy310, pypy311) | |
 | Linux (glibc) | i686 | 1 (abi3) | 2 | |
-| Linux (glibc) | aarch64 | 1 (abi3) | 2 | QEMU |
+| Linux (glibc) | aarch64 | 1 (abi3) | 2 | native ARM runner |
 | Linux (musl) | x86_64 | 1 (abi3) | — | no PyPy musl support |
-| Linux (musl) | aarch64 | 1 (abi3) | — | QEMU, no PyPy musl support |
+| Linux (musl) | aarch64 | 1 (abi3) | — | native ARM runner, no PyPy musl support |
 | Windows | AMD64 | 1 (abi3) | — | mingw32 incompatible with PyPy |
 | macOS | arm64 | 1 (abi3) | — | cffi 2.x ABI conflict on PyPy |
 
@@ -131,5 +131,5 @@ PyPy version (Linux only).
 ## Version scheme
 
 Versions follow `<libcurl_major>.<libcurl_minor>.<libcurl_patch>.<release>`,
-e.g. `8.18.0.1`. The first three components track the upstream libcurl version;
+e.g. `8.19.0.1`. The first three components track the upstream libcurl version;
 the fourth is incremented for mcurl-specific releases against the same libcurl.

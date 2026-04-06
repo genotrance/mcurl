@@ -26,18 +26,21 @@ operating systems.
 - Runs `make check` (pre-commit hooks + mypy)
 
 **`tests`** (matrix):
-- OS: `{ubuntu-latest, macos-latest}`
+- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-latest}`
 - Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.10, pypy3.11}`
+- Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.10/3.11).
+- Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.10) on
+  native `ubuntu-24.04-arm` runners — no QEMU emulation.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.
   PyPy on Linux works correctly because the built-in cffi is preserved.
 - Builds the cffi extension and runs `pytest` with coverage
 
-**`tests-windows`** (windows-latest):
-- Builds and tests a single wheel (`cp312-win_amd64`) via cibuildwheel.
+**`tests-windows`** (matrix):
+- Tests multiple Python versions (`3.9, 3.12, 3.13, 3.14`) via cibuildwheel.
 - Uses the same `pyproject.toml` `[tool.cibuildwheel.windows]` config as the
   release build, providing confidence that Windows wheels are correct without
-  running the full matrix on Windows.
+  running the full build matrix on every CI push.
 
 The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that Python 3.14 and PyPy can be installed.
@@ -62,10 +65,16 @@ The composite action `.github/actions/setup-python-env`:
   `brotlicffi` publishes a compatible release.
 - `jsonschema<4.18` is pinned to avoid pulling in `rpds-py` (Rust, no PyPy
   wheel) via the `httpbin → flasgger → jsonschema` chain.
-- Windows is tested via a single `cp312-win_amd64` cibuildwheel job in CI
-  and fully built across all versions in `build.yml`. The CI job overrides
-  `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS` to use `uv pip install` instead of
-  `pip install` because pip is not available in cibuildwheel's build venv.
+- **musllinux** is tested via cibuildwheel in `build.yml`, which builds
+  musllinux wheels and runs the test suite inside the manylinux/musllinux
+  containers. A separate musl job in `main.yml` is not needed because
+  jbb's bundled OpenSSL conflicts with the newer system OpenSSL in musl
+  containers, breaking Python's `ssl` module.
+- Windows CI tests multiple Python versions (3.9, 3.12, 3.13, 3.14) via
+  cibuildwheel and is fully built across all versions in `build.yml`. The CI
+  job overrides `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS` to use `uv pip install`
+  instead of `pip install` because pip is not available in cibuildwheel's
+  build venv.
 
 ---
 
@@ -85,6 +94,7 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
    and the current `pyproject.toml` version.
 2. **`build-sdist`** — builds the source distribution.
 3. **`build-wheels`** — cibuildwheel matrix across platforms/architectures.
+   Linux aarch64 builds use native `ubuntu-24.04-arm` runners (no QEMU).
 4. **`publish`** — uploads to PyPI via
    [trusted publisher](https://docs.pypi.org/trusted-publishers/) and creates
    a git tag.

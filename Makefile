@@ -10,7 +10,7 @@ install: ## Install the virtual environment, build extension, and install pre-co
 
 .PHONY: env
 env: ## Print LD_LIBRARY_PATH export for local development
-	@python3 -c "import jbb; print('export LD_LIBRARY_PATH=' + ':'.join(jbb.jbb('LibCURL', outdir='$(TMP)/mcurl/'+jbb.get_key(), quiet=True)))"
+	@uv run --with jbb python -c "import jbb; print('export LD_LIBRARY_PATH=' + ':'.join(jbb.jbb('LibCURL', outdir='$(TMP)/mcurl/'+jbb.get_key(), quiet=True)))"
 
 .PHONY: check
 check: ## Run code quality tools
@@ -26,11 +26,12 @@ build: clean ## Build sdist and wheel
 	@TMP=$(TMP) uv build
 
 .PHONY: clean
-clean: ## Remove build artifacts
+clean: ## Remove build artifacts and jbb cache
 	@rm -rf dist/ build/ *.egg-info pymcurl.egg-info wheelhouse/
 	@rm -f .coverage coverage.xml
 	@find . -name '*.so' -not -path './.venv/*' -delete
 	@find . -name '*.o' -not -path './.venv/*' -delete
+	@rm -rf $(TMP)/mcurl/
 
 .PHONY: help
 help:

@@ -29,15 +29,48 @@ jobs:
   tests:
     runs-on: ${{ matrix.os }}
     strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "pypy3.10", "pypy3.11"]
-        exclude:
-          - os: macos-latest
-            python-version: "pypy3.10"
-          - os: macos-latest
-            python-version: "pypy3.11"
       fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 - all Python versions
+          - os: ubuntu-latest
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: ubuntu-latest
+            python-version: "pypy3.10"
+          - os: ubuntu-latest
+            python-version: "pypy3.11"
+          # Linux aarch64 - native ARM runners
+          - os: ubuntu-24.04-arm
+            python-version: "3.9"
+          - os: ubuntu-24.04-arm
+            python-version: "3.13"
+          - os: ubuntu-24.04-arm
+            python-version: "3.14"
+          - os: ubuntu-24.04-arm
+            python-version: "pypy3.10"
+          # macOS arm64
+          - os: macos-latest
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.14"
     defaults:
       run:
         shell: bash
@@ -68,6 +101,19 @@ jobs:
 
   tests-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.9"
+            cibw_build: "cp39-win_amd64"
+          - python-version: "3.12"
+            cibw_build: "cp312-win_amd64"
+          - python-version: "3.13"
+            cibw_build: "cp313-win_amd64"
+          - python-version: "3.14"
+            cibw_build: "cp314-win_amd64"
+    name: test windows ${{ matrix.python-version }}
     steps:
       - name: Check out
         uses: actions/checkout@v6
@@ -76,10 +122,10 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v3.3.1
+        uses: pypa/cibuildwheel@v3.4.0
         env:
           CIBW_ARCHS: AMD64
-          CIBW_BUILD: "cp312-win_amd64"
+          CIBW_BUILD: ${{ matrix.cibw_build }}
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
             uv pip install delvewheel jbb &&
             python -c "import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\mcurl\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])"

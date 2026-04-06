@@ -5,7 +5,7 @@
 ## Module-level functions
 
 ### `curl_version()`
-Get curl version as numeric representation (e.g. `0x081200` for 8.18.0).
+Get curl version as numeric representation (e.g. `0x081300` for 8.19.0).
 
 ### `get_curl_vinfo()`
 Get the raw `curl_version_info_data` struct from libcurl.

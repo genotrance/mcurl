@@ -1,4 +1,5 @@
 import io
+import os
 import platform
 import sys
 
@@ -12,6 +13,27 @@ def test_curl_version():
     # curl_version() returns a positive integer
     ver = mcurl.curl_version()
     assert isinstance(ver, int) and ver > 0, f"Invalid version: {ver}"
+
+
+def test_libcurl_version_matches_pyproject():
+    # Verify the runtime libcurl version matches the version specified in pyproject.toml
+    # pyproject.toml version is e.g. "8.19.0.1" - first 3 octets are the libcurl version
+    toml_path = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
+    expected = None
+    with open(toml_path) as f:
+        for line in f:
+            if line.startswith("version"):
+                spl = line.split("=", 1)
+                if len(spl) == 2:
+                    full_version = spl[1].strip(' "\n')
+                    # First 3 octets = libcurl version (strip last octet)
+                    expected = full_version[: full_version.rfind(".")]
+                    break
+    assert expected is not None, "Could not read version from pyproject.toml"
+
+    vinfo = libcurl.curl_version_info(libcurl.CURLVERSION_LAST - 1)
+    actual = ffi.string(vinfo.version).decode("utf-8")
+    assert actual == expected, f"libcurl version mismatch: runtime={actual}, pyproject.toml={expected}"
 
 
 def test_curl_features():

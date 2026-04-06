@@ -161,8 +161,11 @@ def code_cleanup(code):
                     except:
                         continue
 
-                    # Workaround for ~(unsigned long)
-                    if spl[1].startswith("CURLAUTH_ANY"):
+                    # Workaround for ~(unsigned long) - only needed when
+                    # bitwise NOT produces a negative Python value (old-style
+                    # headers without the 0xffffffff mask). Curl 8.19.0+ masks
+                    # with ((unsigned long)0xffffffff) so val is already positive.
+                    if spl[1].startswith("CURLAUTH_ANY") and val < 0:
                         if sys.platform == "win32" or sys.maxsize <= 2**32:
                             val += 0xFFFFFFFF + 1
                         else:
