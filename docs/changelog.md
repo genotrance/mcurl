@@ -8,6 +8,8 @@
 - Fixed cffi build failure on macOS caused by curl 8.19.0 changing
   `CURLAUTH_ANY` / `CURLAUTH_ANYSAFE` macros to use an explicit
   `((unsigned long)0xffffffff)` mask.
+- Removed compatibility code for libcurl < v7.45 since mcurl bundles its own
+  libcurl binary.
 
 ---
 

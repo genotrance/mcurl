@@ -84,8 +84,8 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
 
 ### Triggers
 - **Push to `main`**: auto-build + publish
-- **Push to `devel`**: build only (publish is gated to `main`)
-- **`workflow_dispatch`**: manual trigger
+- **`workflow_dispatch`**: manual trigger (can be used on any branch including
+  `devel` for ad-hoc builds without publishing)
 
 ### Jobs
 
@@ -128,6 +128,7 @@ current without manual tracking.
 
 ## Deployment flow
 
-1. Push to `devel` → CI runs (quality + test matrix) + `build.yml` builds wheels (no publish)
-2. If CI and wheels green → merge `devel` → `main`
-3. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release
+1. Push to `devel` → CI runs (quality + test matrix)
+2. Optionally trigger `build.yml` manually on `devel` to verify wheel builds
+3. If CI green → merge `devel` → `main`
+4. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release
