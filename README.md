@@ -99,8 +99,7 @@ m.close()
 The [libcurl C API](https://curl.se/libcurl/c/) can also be accessed directly:
 
 ```python
-from _libcurl_cffi import lib as libcurl
-from _libcurl_cffi import ffi
+from mcurl import ffi, libcurl
 
 url = "http://httpbin.org/get"
 curl = ffi.new("char []", url.encode("utf-8"))

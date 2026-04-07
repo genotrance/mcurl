@@ -196,8 +196,7 @@ def test_set_transfer_decoding(httpbin_both):
 def test_get_primary_ip(httpbin_both):
     # get_primary_ip() uses ffi.new("char *[]") which requires a length
     # This tests the underlying getinfo call via raw cffi
-    from _libcurl_cffi import ffi
-    from _libcurl_cffi import lib as libcurl
+    from mcurl import ffi, libcurl
 
     ec = mcurl.Curl(httpbin_both.url + "/get")
     ec.set_insecure(True)

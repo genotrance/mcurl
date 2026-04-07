@@ -32,6 +32,26 @@ def dprint(_):
 
 MCURL = None
 
+__all__ = [
+    "Curl",
+    "MCurl",
+    "curl_version",
+    "cvp2pystr",
+    "ffi",
+    "get_curl_features",
+    "get_curl_vinfo",
+    "getauth",
+    "gethash",
+    "libcurl",
+    "print_curl_version",
+    "py2cbool",
+    "py2clong",
+    "py2cstr",
+    "py2custr",
+    "sanitized",
+    "yield_msgs",
+]
+
 # Merging ideas from:
 #   https://github.com/pycurl/pycurl/blob/master/examples/multi-socket_action-select.py
 #   https://github.com/fsbs/aiocurl
@@ -240,6 +260,30 @@ def header_callback(buffer, size, nitems, userdata):
     return 0
 
 
+@ffi.def_extern()
+def xferinfo_callback(clientp, dltotal, dlnow, ultotal, ulnow):
+    curl = MCURL.handles[cvp2pystr(clientp)]
+    if curl._xferinfo_fn is not None:
+        return curl._xferinfo_fn(dltotal, dlnow, ultotal, ulnow)
+    return 0
+
+
+@ffi.def_extern()
+def seek_callback(clientp, offset, origin):
+    curl = MCURL.handles[cvp2pystr(clientp)]
+    if curl._seek_fn is not None:
+        return curl._seek_fn(offset, origin)
+    # Default: seek on client_rfile if it supports seeking
+    if curl.client_rfile is not None and hasattr(curl.client_rfile, "seek"):
+        try:
+            curl.client_rfile.seek(offset, origin)
+        except (OSError, ValueError):
+            return libcurl.CURL_SEEKFUNC_FAIL
+        else:
+            return libcurl.CURL_SEEKFUNC_OK
+    return libcurl.CURL_SEEKFUNC_CANTSEEK
+
+
 class Curl:
     "Helper class to manage a curl easy instance"
 
@@ -286,6 +330,11 @@ class Curl:
     is_tunnel = False
     is_upload = False
 
+    @staticmethod
+    def strerror(code):
+        "Return human-readable string for a CURLcode error"
+        return ffi.string(libcurl.curl_easy_strerror(code)).decode("utf-8")
+
     def __init__(self, url, method="GET", request_version="HTTP/1.1", connect_timeout=60):
         """
         Initialize curl instance
@@ -300,6 +349,8 @@ class Curl:
         self.easy = libcurl.curl_easy_init()
         self.easyhash = gethash(self.easy)
         self._keepalive = []
+        self._xferinfo_fn = None
+        self._seek_fn = None
         self.ceasyhash = self._keepstr(self.easyhash)
         dprint(self.easyhash + ": New curl instance")
 
@@ -307,7 +358,7 @@ class Curl:
 
     def __del__(self):
         "Destructor - clean up resources"
-        if libcurl is not None:
+        if libcurl is not None and self.easy is not None:
             if self.headers is not None:
                 # Free curl headers if any
                 libcurl.curl_slist_free_all(self.headers)
@@ -330,6 +381,9 @@ class Curl:
         # Timeouts
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_CONNECTTIMEOUT, py2clong(connect_timeout))
         # libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TIMEOUT, py2clong(60))
+
+        # Disable signal-based timeouts - required for thread safety
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_NOSIGNAL, py2cbool(True))
 
         # SSL CAINFO
         if sys.platform != "win32":
@@ -381,7 +435,14 @@ class Curl:
         )
 
     def reset(self, url, method="GET", request_version="HTTP/1.1", connect_timeout=60):
-        "Reuse existing curl instance for another request"
+        """Reuse existing curl instance for another request.
+
+        Calls curl_easy_reset() (which clears all libcurl options) and then
+        re-applies the standard mcurl setup via _setup(). Options set via
+        setopt() or other libcurl-level calls are NOT preserved - only
+        mcurl-managed state (URL, method, connect timeout, CA bundle, etc.)
+        is re-established.
+        """
         dprint(self.easyhash + ": Resetting curl")
         libcurl.curl_easy_reset(self.easy)
         self.sock_fd = None
@@ -396,6 +457,8 @@ class Curl:
         self.user = None
         self.xheaders = None
         self._keepalive = []
+        self._xferinfo_fn = None
+        self._seek_fn = None
 
         self.cerr = libcurl.CURLE_OK
         self.done = False
@@ -405,6 +468,7 @@ class Curl:
         self.suppress = False
 
         self.is_connect = False
+        self.is_easy = False
         self.is_patch = False
         self.is_post = False
         self.is_tunnel = False
@@ -418,14 +482,14 @@ class Curl:
         self._setup(url, method, request_version, connect_timeout)
 
     def set_tunnel(self, tunnel=True):
-        "Set to tunnel through proxy if no proxy or proxy + auth"
+        "Enable or disable HTTP proxy tunneling (CONNECT method through proxy)"
         dprint(self.easyhash + ": HTTP proxy tunneling = " + str(tunnel))
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPPROXYTUNNEL, py2cbool(tunnel))
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SUPPRESS_CONNECT_HEADERS, py2cbool(tunnel))
         self.is_tunnel = tunnel
 
     def set_proxy(self, proxy, port=0, noproxy=None):
-        "Set proxy options - returns False if this proxy server has auth failures"
+        "Set proxy server; returns False if this proxy has exceeded the auth failure threshold"
         if proxy in MCURL.failed and MCURL.failed[proxy] >= MCURL.failure_threshold:
             dprint(
                 self.easyhash
@@ -447,7 +511,7 @@ class Curl:
         return True
 
     def set_auth(self, user, password=None, auth="ANY"):
-        "Set proxy authentication info - call after set_proxy() to enable auth caching"
+        "Set proxy authentication credentials; call after set_proxy() to enable auth caching"
         if user == ":":
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_PROXYUSERPWD, self._keepstr(user))
         else:
@@ -474,7 +538,7 @@ class Curl:
                 self.set_tunnel()
 
     def set_headers(self, xheaders):
-        "Set headers to send"
+        "Set request headers from a dict of {name: value} pairs"
         self.headers = ffi.NULL
         skip_proxy_headers = True if self.proxy is not None and self.auth is not None else False
         for header in xheaders:
@@ -522,16 +586,16 @@ class Curl:
                 libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPHEADER, self.headers)
 
     def set_insecure(self, enable=True):
-        "Set curl to ignore SSL errors"
+        "Disable SSL certificate and hostname verification"
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SSL_VERIFYPEER, py2cbool(not enable))
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SSL_VERIFYHOST, py2cbool(not enable))
 
     def set_verbose(self, enable=True):
-        "Set verbose mode"
+        "Enable libcurl verbose output to stderr"
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_VERBOSE, py2cbool(enable))
 
     def set_debug(self, enable=True):
-        "Enable debug output"
+        "Enable verbose mode with debug callback routed through dprint()"
         if enable:
             self.set_verbose()
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
@@ -565,7 +629,7 @@ class Curl:
             self.sentheaders = True
 
     def buffer(self, data=None):
-        "Setup buffers to bridge curl perform"
+        "Setup BytesIO buffers for perform(); pass data for upload (POST/PUT) bodies"
         dprint(self.easyhash + ": Setting up buffers for bridge")
         rfile = None
         if data is not None:
@@ -578,22 +642,391 @@ class Curl:
 
         self.bridge(rfile, wfile, hfile)
 
+        # Auto-register seek callback when data is provided (BytesIO supports seek)
+        if data is not None:
+            self.set_seek()
+
     def set_transfer_decoding(self, enable=False):
-        "Set curl to turn off transfer decoding - let client do it"
+        "Control transfer decoding (chunked, gzip); disable to let the client handle it"
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTP_TRANSFER_DECODING, py2cbool(enable))
 
     def set_useragent(self, useragent):
-        "Set user agent to send"
+        "Set the User-Agent header string"
         if len(useragent) != 0:
             dprint(self.easyhash + ": Setting user agent to " + useragent)
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_USERAGENT, py2cstr(useragent))
 
     def set_follow(self, enable=True):
-        "Set curl to follow 3xx responses"
+        "Enable or disable following 3xx redirect responses"
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_FOLLOWLOCATION, py2cbool(enable))
 
+    # Generic setopt/getinfo (section 3)
+
+    def setopt(self, option, value):
+        """Set any CURLOPT option on this easy handle.
+
+        Automatically converts Python values to the correct cffi type based on
+        the CURLOPT type range:
+        - LONG options (int/bool): Python int/bool -> C long
+        - STRING options (str): Python str -> C char* (kept alive)
+        - OFF_T options (large int): Python int -> curl_off_t
+        - FUNCTIONPOINT/BLOB/other: passed through as-is
+
+        For OBJECTPOINT options that are not strings (e.g. slist pointers),
+        pass the cffi object directly.
+        """
+        if option >= libcurl.CURLOPTTYPE_BLOB:
+            libcurl.curl_easy_setopt(self.easy, option, value)
+        elif option >= libcurl.CURLOPTTYPE_OFF_T:
+            if isinstance(value, int):
+                value = ffi.cast("curl_off_t", value)
+            libcurl.curl_easy_setopt(self.easy, option, value)
+        elif option >= libcurl.CURLOPTTYPE_FUNCTIONPOINT:
+            libcurl.curl_easy_setopt(self.easy, option, value)
+        elif option >= libcurl.CURLOPTTYPE_OBJECTPOINT:
+            if isinstance(value, str):
+                value = self._keepstr(value)
+            elif isinstance(value, bytes):
+                value = ffi.new("char[]", value)
+                self._keepalive.append(value)
+            libcurl.curl_easy_setopt(self.easy, option, value)
+        else:
+            # LONG range (includes bools)
+            if isinstance(value, (int, bool)):
+                value = ffi.cast("long", int(value))
+            libcurl.curl_easy_setopt(self.easy, option, value)
+
+    def getinfo(self, info):
+        """Get any CURLINFO value from this easy handle.
+
+        Returns (CURLcode, value). Infers result type from the CURLINFO type mask.
+        """
+        info_type = info & 0xF00000
+        if info_type == libcurl.CURLINFO_STRING:
+            p = ffi.new("char **")
+            ret = libcurl.curl_easy_getinfo(self.easy, info, p)
+            val = ffi.string(p[0]).decode("utf-8") if p[0] != ffi.NULL else ""
+        elif info_type == libcurl.CURLINFO_LONG:
+            p = ffi.new("long *")
+            ret = libcurl.curl_easy_getinfo(self.easy, info, p)
+            val = p[0]
+        elif info_type == libcurl.CURLINFO_DOUBLE:
+            p = ffi.new("double *")
+            ret = libcurl.curl_easy_getinfo(self.easy, info, p)
+            val = p[0]
+        elif info_type == libcurl.CURLINFO_SLIST:
+            p = ffi.new("struct curl_slist **")
+            ret = libcurl.curl_easy_getinfo(self.easy, info, p)
+            val = []
+            node = p[0]
+            while node != ffi.NULL:
+                val.append(ffi.string(node.data).decode("utf-8"))
+                node = node.next
+            libcurl.curl_slist_free_all(p[0])
+        elif info_type == libcurl.CURLINFO_OFF_T:
+            p = ffi.new("curl_off_t *")
+            ret = libcurl.curl_easy_getinfo(self.easy, info, p)
+            val = p[0]
+        elif info_type == libcurl.CURLINFO_SOCKET:
+            if sys.platform == "win32":
+                p = ffi.new("unsigned int *")
+            else:
+                p = ffi.new("int *")
+            ret = libcurl.curl_easy_getinfo(self.easy, info, p)
+            val = p[0]
+        else:
+            raise ValueError(f"Unknown CURLINFO type: {info_type:#x}")
+        return ret, val
+
+    def unsetopt(self, option):
+        """Unset a CURLOPT option, restoring it to libcurl's default.
+
+        Best-effort: sets pointer options to NULL and integer options to 0.
+        This works correctly for most options but has caveats:
+        - Callback options: only clears the function, not the data pointer.
+          Prefer reset() for callbacks, or clear both function and data.
+        - Some string options use empty string as the "off" value, not NULL
+          (e.g. CURLOPT_PROXY). Use setopt() with "" for those.
+        - Some options cannot be unset (e.g. CURLOPT_COOKIEFILE).
+
+        For a complete reset of all options, use reset() instead.
+        """
+        if option >= libcurl.CURLOPTTYPE_OFF_T:
+            libcurl.curl_easy_setopt(self.easy, option, ffi.cast("curl_off_t", 0))
+        elif option >= libcurl.CURLOPTTYPE_FUNCTIONPOINT or option >= libcurl.CURLOPTTYPE_OBJECTPOINT:
+            libcurl.curl_easy_setopt(self.easy, option, ffi.NULL)
+        else:
+            libcurl.curl_easy_setopt(self.easy, option, py2clong(0))
+
+    # Timeout (section 5)
+
+    def set_timeout(self, seconds):
+        "Set total transfer timeout in seconds (0 = no timeout)"
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TIMEOUT, py2clong(seconds))
+
+    # HTTP server auth (section 6)
+
+    def set_httpauth(self, user, password=None, auth="ANY"):
+        """Set HTTP server authentication (not proxy auth - see set_auth()).
+
+        user:     username string
+        password: password string (optional)
+        auth:     authentication method string passed to getauth(), e.g.
+                  "ANY", "BASIC", "DIGEST", "NTLM", "NEGOTIATE", "BEARER",
+                  or a combo like "BASIC|DIGEST". See getauth() for the full
+                  prefix logic (NO, SAFENO, ONLY).
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_USERNAME, self._keepstr(user))
+        if password is not None:
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_PASSWORD, self._keepstr(password))
+        authval = getauth(auth)
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPAUTH, py2clong(authval))
+
+    def set_bearer_token(self, token):
+        """Set OAuth 2.0 Bearer token for server authentication.
+
+        Automatically sets HTTPAUTH to BEARER. The token is the raw OAuth 2.0
+        access token string (without the 'Bearer ' prefix).
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_XOAUTH2_BEARER, self._keepstr(token))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPAUTH, py2clong(libcurl.CURLAUTH_BEARER))
+
+    # Cookie methods (section 7)
+
+    def set_cookie(self, cookie):
+        """Set a cookie header string for this request.
+
+        This sets the Cookie: header directly, bypassing the cookie engine.
+        e.g. 'name=value; name2=value2'
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_COOKIE, self._keepstr(cookie))
+
+    def load_cookies(self, filename):
+        """Enable the cookie engine and load cookies from a file.
+
+        Pass empty string to enable the engine without loading a file.
+        File format: Netscape cookie format or HTTP Set-Cookie header lines.
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_COOKIEFILE, self._keepstr(filename))
+
+    def save_cookies(self, filename):
+        "Save all known cookies to a file when the handle is cleaned up"
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_COOKIEJAR, self._keepstr(filename))
+
+    def add_cookie(self, cookie):
+        """Add or manipulate a single cookie in the in-memory cookie store.
+
+        Accepts one of:
+        - A cookie string in Netscape format (tab-delimited fields)
+        - A Set-Cookie: header line
+        - A control command: ALL (erase all), SESS (erase session cookies),
+          FLUSH (write jar to disk), RELOAD (re-read cookie file)
+
+        To add multiple cookies, call this method once per cookie.
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_COOKIELIST, self._keepstr(cookie))
+
+    def clear_cookies(self):
+        "Erase all cookies from the in-memory cookie store"
+        self.add_cookie("ALL")
+
+    def remove_cookie(self, domain, path, name):
+        """Remove a specific cookie from the in-memory cookie store.
+
+        Works by replacing the cookie with an expired version (expiry=1).
+        Requires the cookie engine to be enabled (call load_cookies("") first).
+        """
+        subdomain = "TRUE" if domain.startswith(".") else "FALSE"
+        self.add_cookie(f"{domain}\t{subdomain}\t{path}\tFALSE\t1\t{name}\t")
+
+    def get_cookies(self):
+        "Return all known cookies as a list of Netscape-format strings"
+        slist = ffi.new("struct curl_slist **")
+        ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_COOKIELIST, slist)
+        cookies = []
+        node = slist[0]
+        while node != ffi.NULL:
+            cookies.append(ffi.string(node.data).decode("utf-8"))
+            node = node.next
+        libcurl.curl_slist_free_all(slist[0])
+        return ret, cookies
+
+    # Redirect control (section 8)
+
+    def set_maxredirs(self, count):
+        "Set maximum number of redirects to follow (-1 = unlimited, 0 = refuse all)"
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_MAXREDIRS, py2clong(count))
+
+    def set_postredir(self, bitmask):
+        """Control whether POST method is kept on redirects.
+
+        By default libcurl converts POST to GET on 301/302/303 redirects.
+        Use this to maintain POST on specific redirect codes:
+        - CURL_REDIR_POST_301 - keep POST on 301 Moved Permanently
+        - CURL_REDIR_POST_302 - keep POST on 302 Found
+        - CURL_REDIR_POST_303 - keep POST on 303 See Other
+        - CURL_REDIR_POST_ALL - keep POST on all three
+
+        These constants are available on mcurl.libcurl. Combine with bitwise OR.
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POSTREDIR, py2clong(bitmask))
+
+    # Content encoding (section 9)
+
+    def set_encoding(self, encoding=""):
+        """Request compressed responses.
+
+        Pass empty string (default) to accept all encodings supported by the
+        bundled libcurl (typically gzip, deflate, br, zstd). Pass a specific
+        encoding name to request only that one, or a comma-separated list.
+        libcurl handles decompression transparently.
+        """
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_ACCEPT_ENCODING, self._keepstr(encoding))
+
+    # Duplicate handle (section 10)
+
+    def dup(self, url=None):
+        """Clone this handle with all libcurl options into a new Curl instance.
+
+        Returns a new Curl object wrapping a duplicated libcurl easy handle.
+        Transient state (buffers, headers slist, status flags) is reset on
+        the clone. If url is provided, the clone's URL is updated.
+
+        Useful for template-based workflows: configure a handle once (SSL,
+        auth, proxy, timeouts, etc.) then dup() it for each request instead
+        of repeating the setup. All options set via setopt() are preserved
+        in the clone, unlike reset() which clears them.
+        """
+        new = Curl.__new__(Curl)
+        new.easy = libcurl.curl_easy_duphandle(self.easy)
+        new.easyhash = gethash(new.easy)
+        new._keepalive = []
+        new._xferinfo_fn = None
+        new._seek_fn = None
+        new.ceasyhash = new._keepstr(new.easyhash)
+
+        # Copy Python-level state
+        new.method = self.method
+        new.request_version = self.request_version
+        new.proxy = self.proxy
+        new.auth = self.auth
+        new.user = self.user
+        new.is_easy = self.is_easy
+
+        if url is not None:
+            new.url = url
+            libcurl.curl_easy_setopt(new.easy, libcurl.CURLOPT_URL, new._keepstr(url))
+        else:
+            new.url = self.url
+
+        # Reset transient state
+        new.headers = ffi.NULL
+        new.xheaders = None
+        new.sock_fd = None
+        new.client_rfile = None
+        new.client_wfile = None
+        new.client_hfile = None
+        new.size = None
+        new.cerr = libcurl.CURLE_OK
+        new.done = False
+        new.errstr = ""
+        new.resp = 503
+        new.sentheaders = False
+        new.suppress = False
+        new.is_connect = False
+        new.is_patch = False
+        new.is_post = False
+        new.is_tunnel = False
+        new.is_upload = False
+
+        return new
+
+    # Pause / unpause (section 11)
+
+    def pause(self, bitmask=None):
+        """Pause receive and/or send on this handle.
+
+        bitmask: combination of CURLPAUSE_RECV, CURLPAUSE_SEND.
+        Default (None) pauses both (CURLPAUSE_ALL).
+        """
+        if bitmask is None:
+            bitmask = libcurl.CURLPAUSE_ALL
+        return libcurl.curl_easy_pause(self.easy, bitmask)
+
+    def unpause(self):
+        "Resume all paused transfers on this handle"
+        return libcurl.curl_easy_pause(self.easy, libcurl.CURLPAUSE_CONT)
+
+    # Transfer progress callback (section 12)
+
+    def set_xferinfo(self, callback):
+        """Set a progress callback.
+
+        callback(dltotal, dlnow, ultotal, ulnow) -> int
+        Return 0 to continue, non-zero to abort the transfer.
+        All values are in bytes.
+        """
+        self._xferinfo_fn = callback
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_NOPROGRESS, py2cbool(False))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_XFERINFOFUNCTION, libcurl.xferinfo_callback)
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_XFERINFODATA, self.ceasyhash)
+
+    # Seek callback (section 13)
+
+    def set_seek(self, callback=None):
+        """Set a seek callback for request body rewinding.
+
+        callback(offset, origin) -> int
+        Return CURL_SEEKFUNC_OK (0) on success, CURL_SEEKFUNC_FAIL (1) on
+        error, or CURL_SEEKFUNC_CANTSEEK (2) if seeking is not possible.
+
+        If callback is None, uses a default that seeks on client_rfile.
+        Called automatically by buffer() when upload data is provided.
+        """
+        self._seek_fn = callback
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SEEKFUNCTION, libcurl.seek_callback)
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SEEKDATA, self.ceasyhash)
+
+    # Context manager support (section 14)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.headers is not None:
+            libcurl.curl_slist_free_all(self.headers)
+            self.headers = None
+        libcurl.curl_easy_cleanup(self.easy)
+        self.easy = None
+
+    # Getinfo convenience methods (section 16)
+
+    def get_effective_url(self):
+        "Return the effective (final) URL after redirects"
+        url = ffi.new("char **")
+        libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_EFFECTIVE_URL, url)
+        return ffi.string(url[0]).decode("utf-8") if url[0] != ffi.NULL else ""
+
+    def get_response_code(self):
+        "Return the HTTP response code"
+        code = ffi.new("long *")
+        libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_RESPONSE_CODE, code)
+        return code[0]
+
+    def get_content_type(self):
+        "Return the Content-Type header value, or None"
+        ct = ffi.new("char **")
+        libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_CONTENT_TYPE, ct)
+        return ffi.string(ct[0]).decode("utf-8") if ct[0] != ffi.NULL else None
+
+    def get_total_time(self):
+        "Return total transfer time in seconds (float)"
+        t = ffi.new("double *")
+        libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_TOTAL_TIME, t)
+        return t[0]
+
     def perform(self):
-        "Perform the easy handle"
+        "Execute the request using the easy interface (standalone, without multi)"
 
         # Perform as a standalone easy handle, not using multi
         # However, add easyhash to MCURL.handles since it is used in curl callbacks
@@ -601,7 +1034,7 @@ class Curl:
             MCURL.handles[self.easyhash] = self
         self.cerr = libcurl.curl_easy_perform(self.easy)
         if self.cerr != libcurl.CURLE_OK:
-            dprint(self.easyhash + ": Connection failed: " + str(self.cerr) + "; " + self.errstr)
+            dprint(self.easyhash + ": Connection failed: " + Curl.strerror(self.cerr) + "; " + self.errstr)
         with MCURL._lock:
             MCURL.handles.pop(self.easyhash)
         self._save_auth()
@@ -610,7 +1043,7 @@ class Curl:
     # Get status and info after running curl handle
 
     def get_response(self):
-        "Return response code of completed request"
+        "Return (CURLcode, response_code) of completed request; uses CONNECTCODE for CONNECT method"
         codep = ffi.new("long *")
         if self.method == "CONNECT":
             ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_HTTP_CONNECTCODE, codep)
@@ -619,7 +1052,7 @@ class Curl:
         return ret, codep[0]
 
     def get_activesocket(self):
-        "Return active socket for this easy instance"
+        "Return (CURLcode, socket_fd) for this handle's active connection"
         if sys.platform == "win32":
             sock_fd = ffi.new("unsigned int *")
         else:
@@ -628,19 +1061,19 @@ class Curl:
         return ret, sock_fd[0]
 
     def get_primary_ip(self):
-        "Return primary IP address of this easy instance"
+        "Return (CURLcode, ip_string) of the remote server"
         ip = ffi.new("char *[]")
         ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_PRIMARY_IP, ip)
         return ret, ffi.string(ip).decode("utf-8")
 
     def get_used_proxy(self):
-        "Return whether proxy was used for this easy instance"
+        "Return (CURLcode, bool) indicating whether a proxy was used"
         used_proxy = ffi.new("long *")
         ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_USED_PROXY, used_proxy)
         return ret, used_proxy[0] != 0
 
     def get_proxyauth_used(self):
-        "Return which proxy auth method was used for this easy instance"
+        "Return (CURLcode, auth_bitmask) for the proxy auth method that was negotiated"
         proxyauth_used = ffi.new("long *")
         ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_PROXYAUTH_USED, proxyauth_used)
         return ret, proxyauth_used[0]
@@ -778,6 +1211,11 @@ class MCurl:
     rlist = None
     wlist = None
 
+    @staticmethod
+    def strerror(code):
+        "Return human-readable string for a CURLMcode error"
+        return ffi.string(libcurl.curl_multi_strerror(code)).decode("utf-8")
+
     def __init__(self, debug_print=None):
         "Initialize multi interface"
         global dprint
@@ -813,7 +1251,7 @@ class MCurl:
         self._lock = threading.Lock()
 
     def setopt(self, option, value):
-        "Configure multi options"
+        "Configure a multi option (socket/timer callbacks are reserved by mcurl)"
         if option in (libcurl.CURLMOPT_SOCKETFUNCTION, libcurl.CURLMOPT_TIMERFUNCTION):
             raise Exception("Callback options reserved for the event loop")
         libcurl.curl_multi_setopt(self._multi, option, value)
@@ -853,7 +1291,6 @@ class MCurl:
 
                 if msg.data.result != libcurl.CURLE_OK:
                     curl.cerr = msg.data.result
-                    curl.errstr = str(msg.data.result) + "; "
 
     # Adding to multi
 
@@ -868,7 +1305,7 @@ class MCurl:
             dprint(curl.easyhash + ": Active handle")
 
     def add(self, curl: Curl):
-        "Add a Curl handle to perform"
+        "Add a Curl handle to the multi instance for concurrent execution"
         with self._lock:
             dprint(curl.easyhash + ": Handles = %d" % len(self.handles))
             self._add_handle(curl)
@@ -892,12 +1329,12 @@ class MCurl:
         self.handles.pop(curl.easyhash)
 
     def remove(self, curl: Curl):
-        "Remove a Curl handle once done"
+        "Remove a completed Curl handle from the multi instance"
         with self._lock:
             self._remove_handle(curl)
 
     def stop(self, curl: Curl):
-        "Stop a running curl handle and remove"
+        "Abort a running Curl handle and remove it from the multi instance"
         with self._lock:
             self._remove_handle(curl, errstr="Stopped")
 
@@ -943,7 +1380,7 @@ class MCurl:
                     self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
 
     def do(self, curl: Curl):
-        "Add a Curl handle and peform until completion"
+        "Add a Curl handle and perform until completion; returns True on success"
         if not curl.is_easy:
             self.add(curl)
             while True:
@@ -960,11 +1397,11 @@ class MCurl:
         if curl.cerr == libcurl.CURLE_URL_MALFORMAT:
             # Bad request
             curl.resp = 400
-            curl.errstr += "URL malformed"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr in [libcurl.CURLE_UNSUPPORTED_PROTOCOL, libcurl.CURLE_NOT_BUILT_IN]:
             # Not implemented
             curl.resp = 501
-            curl.errstr += "Unsupported protocol, not built-in, or function not found"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr in [
             libcurl.CURLE_COULDNT_RESOLVE_PROXY,
             libcurl.CURLE_COULDNT_RESOLVE_HOST,
@@ -972,15 +1409,15 @@ class MCurl:
         ]:
             # Bad gateway
             curl.resp = 502
-            curl.errstr += "Could not resolve or connect to proxy or host"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr == libcurl.CURLE_OPERATION_TIMEDOUT:
             # Gateway timeout
             curl.resp = 504
-            curl.errstr += "Operation timed out"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
             # POST/PUT rewind not supported (#199) - retry
             curl.resp = 503
-            curl.errstr += "Send failed rewind"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr in [
             libcurl.CURLE_SSL_CONNECT_ERROR,
             libcurl.CURLE_PEER_FAILED_VERIFICATION,
@@ -989,19 +1426,19 @@ class MCurl:
         ]:
             # SSL/TLS error
             curl.resp = 502
-            curl.errstr += "SSL error"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr in [libcurl.CURLE_SEND_ERROR, libcurl.CURLE_RECV_ERROR, libcurl.CURLE_GOT_NOTHING]:
             # Network error
             curl.resp = 502
-            curl.errstr += "Network error"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
             # Auth function error (SSPI/GSS-API failure)
             curl.resp = 407
-            curl.errstr += "Proxy auth mechanism error"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr == libcurl.CURLE_HTTP2:
             # HTTP/2 framing error
             curl.resp = 502
-            curl.errstr += "HTTP/2 error"
+            curl.errstr += Curl.strerror(curl.cerr)
         elif curl.cerr != libcurl.CURLE_OK:
             # Unmapped libcurl error
             curl.resp = 503
@@ -1052,7 +1489,7 @@ class MCurl:
         return len(curl.errstr) == 0
 
     def select(self, curl: Curl, client_sock, idle=30):
-        "Run select loop between client and curl"
+        "Run a bidirectional select loop between a client socket and a CONNECT tunnel"
         # TODO figure out if IPv6 or IPv4
         if curl.sock_fd is None:
             dprint(curl.easyhash + ": Cannot select() without active socket")
@@ -1170,6 +1607,14 @@ class MCurl:
         # one side closes the connection. Close both proxy and client
         # connection if still open.
         dprint(curl.easyhash + ": %d bytes read, %d bytes written" % (cl, cs))
+
+    # Context manager support
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     # Cleanup multi
 

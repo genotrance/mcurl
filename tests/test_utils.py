@@ -3,10 +3,8 @@ import os
 import platform
 import sys
 
-from _libcurl_cffi import ffi
-from _libcurl_cffi import lib as libcurl
-
 import mcurl
+from mcurl import ffi, libcurl
 
 
 def test_curl_version():

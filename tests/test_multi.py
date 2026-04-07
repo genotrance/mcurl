@@ -227,7 +227,7 @@ def test_multi_threaded_add_remove(httpbin_both):
 
 def test_multi_setopt_reserved(httpbin_both):
     # setopt() should reject reserved callback options
-    from _libcurl_cffi import lib as libcurl
+    from mcurl import libcurl
 
     m = mcurl.MCurl()
     with pytest.raises(Exception, match="Callback options reserved"):

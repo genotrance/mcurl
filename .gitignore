@@ -33,3 +33,4 @@ uv.lock
 
 # Pre-commit
 .pre-commit-config.yaml.bak
+_libcurl_cffi.c

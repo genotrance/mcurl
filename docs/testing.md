@@ -13,7 +13,8 @@ Tests are split across multiple files in `tests/`:
 | `test_multi.py` | `MCurl` class tests: concurrent handles, threaded do/stop/close, add/remove |
 | `test_auth.py` | Auth-related: `getauth()`, proxy auth, failure threshold |
 | `test_utils.py` | Utility functions: `py2cstr`, `sanitized`, version, features, dependency checks |
-| `test_raw.py` | Raw `_libcurl_cffi` API tests |
+| `test_raw.py` | Raw libcurl cffi API tests (uses `mcurl.ffi` / `mcurl.libcurl`) |
+| `test_api.py` | New API surface: `setopt`/`getinfo`, `unsetopt`, timeout, auth, cookies, redirects, encoding, `dup`, pause/unpause, xferinfo/seek callbacks, context managers, convenience getters, `Curl.strerror`/`MCurl.strerror` |
 
 ---
 

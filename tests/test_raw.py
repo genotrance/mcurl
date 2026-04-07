@@ -1,5 +1,4 @@
-from _libcurl_cffi import ffi
-from _libcurl_cffi import lib as libcurl
+from mcurl import ffi, libcurl
 
 
 def test_raw_easy_init_cleanup():

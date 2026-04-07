@@ -10,6 +10,30 @@
   `((unsigned long)0xffffffff)` mask.
 - Removed compatibility code for libcurl < v7.45 since mcurl bundles its own
   libcurl binary.
+- Added `mcurl.libcurl` and `mcurl.ffi` as public module-level exports for
+  direct access to the cffi bindings.
+- Added `Curl.strerror()` and `MCurl.strerror()` static methods for
+  human-readable error messages.
+- Added generic `setopt()` and `getinfo()` methods on `Curl` with automatic
+  type conversion — Python str, int, and bool values are converted to the
+  correct cffi type based on the CURLOPT/CURLINFO constant.
+- Added `unsetopt()` to reset a curl option to its default.
+- Added `set_timeout()` for overall transfer timeout.
+- Added `set_httpauth()` and `set_bearer_token()` for HTTP authentication.
+- Added cookie management methods: `set_cookie()`, `load_cookies()`,
+  `save_cookies()`, `add_cookie()`, `clear_cookies()`, `remove_cookie()`,
+  and `get_cookies()`.
+- Added `set_maxredirs()` and `set_postredir()` for redirect control.
+- Added `set_encoding()` for content encoding negotiation.
+- Added `dup()` to duplicate a curl handle.
+- Added `pause()` and `unpause()` for transfer flow control.
+- Added `set_xferinfo()` for transfer progress callbacks.
+- Added `set_seek()` for seek callbacks; automatically registered by
+  `buffer()` when upload data is provided.
+- Added context manager support (`with` statement) for both `Curl` and
+  `MCurl`.
+- Added `get_effective_url()`, `get_response_code()`, `get_content_type()`,
+  and `get_total_time()` convenience getters.
 
 ---
 

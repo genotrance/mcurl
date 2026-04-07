@@ -1,6 +1,5 @@
-from _libcurl_cffi import lib as libcurl
-
 import mcurl
+from mcurl import libcurl
 
 
 def test_getauth_none():
