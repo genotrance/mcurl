@@ -13,9 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -46,8 +46,6 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.14"
           - os: ubuntu-latest
-            python-version: "pypy3.10"
-          - os: ubuntu-latest
             python-version: "pypy3.11"
           # Linux aarch64 - native ARM runners
           - os: ubuntu-24.04-arm
@@ -57,7 +55,7 @@ jobs:
           - os: ubuntu-24.04-arm
             python-version: "3.14"
           - os: ubuntu-24.04-arm
-            python-version: "pypy3.10"
+            python-version: "pypy3.11"
           # macOS arm64
           - os: macos-latest
             python-version: "3.9"
@@ -76,7 +74,7 @@ jobs:
         shell: bash
     steps:
       - name: Check out
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
@@ -116,13 +114,13 @@ jobs:
     name: test windows ${{ matrix.python-version }}
     steps:
       - name: Check out
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v3.4.0
+        uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: ${{ matrix.cibw_build }}

@@ -61,7 +61,10 @@ def test_print_curl_version(capsys):
 
 def test_check_deps():
     # Check all dependencies are available
-    features = ["CURL_VERSION_SSL", "CURL_VERSION_SPNEGO", "CURL_VERSION_KERBEROS5", "CURL_VERSION_NTLM"]
+    features = ["CURL_VERSION_SSL", "CURL_VERSION_SPNEGO", "CURL_VERSION_KERBEROS5"]
+    # NTLM removed from Homebrew curl 8.21+ on macOS; still present in jbb builds for Linux/Windows
+    if sys.platform != "darwin":
+        features.append("CURL_VERSION_NTLM")
 
     if sys.platform == "win32":
         features.append("CURL_VERSION_SSPI")

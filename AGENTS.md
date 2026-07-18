@@ -32,4 +32,4 @@
 
 - Make sure test cases test all features and configurations of the project.
 - When adding new features or fixing bugs, add or update tests to cover the new behaviour.
-- All tests must pass on CPython 3.9–3.14 (including free-threaded 3.14t) and PyPy 3.10/3.11 before merging.
+- All tests must pass on CPython 3.9–3.14 (including free-threaded 3.14t) and PyPy 3.11 before merging.

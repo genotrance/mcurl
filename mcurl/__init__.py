@@ -1589,7 +1589,7 @@ class MCurl:
                                 wlist.append(o)
                         else:
                             wdata.popleft()
-                            if not data and o in wlist:
+                            if not wdata and o in wlist:
                                 wlist.remove(o)
                         cs += bsnt
                     else:

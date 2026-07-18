@@ -4,7 +4,7 @@ requires = ["cffi", "jbb", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.19.0.1"
+version = "8.21.0.1"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -55,7 +55,7 @@ include-package-data = true
 
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
-enable = ["pypy", "pypy-eol"]
+enable = ["pypy"]
 skip = ["*-musllinux_i686", "cp314t-*", "pp*-macosx_*", "pp*-win_*"]
 before-build = "rm -rf {project}/build {project}/*.so {project}/_libcurl_cffi*"
 test-requires = ["pytest", "pytest-httpbin"]

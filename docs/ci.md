@@ -27,9 +27,9 @@ operating systems.
 
 **`tests`** (matrix):
 - OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-latest}`
-- Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.10, pypy3.11}`
-- Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.10/3.11).
-- Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.10) on
+- Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.11}`
+- Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.11).
+- Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.

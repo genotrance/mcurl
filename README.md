@@ -193,7 +193,7 @@ Bug reports and pull requests are welcome at <https://github.com/genotrance/mcur
 2. Run `make install` to set up the venv, build the C extension, and install pre-commit hooks.
 3. Create a feature branch, make changes, add tests in `tests/`.
 4. Run `make check && make test` — all checks must pass.
-5. Open a pull request. CI runs on Ubuntu, Windows, and macOS across Python 3.9–3.14 and PyPy 3.10/3.11.
+5. Open a pull request. CI runs on Ubuntu, Windows, and macOS across Python 3.9–3.14 and PyPy 3.11.
 
 ## Building
 

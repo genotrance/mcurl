@@ -2,7 +2,16 @@
 
 ---
 
-## v8.19.0.1 — TBD
+## v8.21.0.1 — TBD
+
+- Fixed `MCurl.select()` busy-loop at 100% CPU after a partial `send()` on a
+  CONNECT tunnel.  A typo (`not data` instead of `not wdata`) prevented sockets
+  from being removed from `wlist` after their write queue drained, causing the
+  loop to spin indefinitely and defeating the idle timeout (#10).
+
+---
+
+## v8.19.0.1 — 2026-04-07
 
 - Updated to libcurl v8.19.0.
 - Fixed cffi build failure on macOS caused by curl 8.19.0 changing
