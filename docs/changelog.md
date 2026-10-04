@@ -2,6 +2,12 @@
 
 ---
 
+## v8.22.0.1 — TBD
+
+- Updated to libcurl v8.22.0.
+
+---
+
 ## v8.21.0.1 — TBD
 
 - Fixed `MCurl.select()` busy-loop at 100% CPU after a partial `send()` on a
