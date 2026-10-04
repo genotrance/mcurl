@@ -26,14 +26,11 @@ operating systems.
 - Runs `make check` (pre-commit hooks + mypy)
 
 **`tests`** (matrix):
-- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-14}`
+- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-latest}`
 - Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.11}`
 - Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.11).
 - Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
-- macOS tests use `macos-14`, matching the macOS release-wheel runner and its
-  Homebrew libcurl version. This prevents a `macos-latest` image upgrade from
-  testing a different libcurl release than the one recorded in `pyproject.toml`.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.
   PyPy on Linux works correctly because the built-in cffi is preserved.
@@ -115,9 +112,6 @@ build matrix.
 - Runs monthly (1st of month, 06:00 UTC) and on manual dispatch.
 - Fetches the latest release tag from `genotrance/LibCURL_jll.jl` via the
   GitHub API.
-- Fails without dispatching a build if the API response does not contain a
-  valid release tag, preventing a transient lookup failure from rebuilding an
-  already-published version.
 - Compares the upstream libcurl version with the current version in
   `pyproject.toml`.
 - If a newer version is found, triggers `build.yml` via `workflow_dispatch`.
