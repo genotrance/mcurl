@@ -32,8 +32,16 @@ jobs:
       - name: Get latest upstream version
         id: upstream
         run: |
-          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
+          API_RESPONSE=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
+            "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest")
+          LATEST_RELEASE=$(python3 -c "import json, sys; print(json.load(sys.stdin).get('tag_name', ''))" <<< "$API_RESPONSE")
           BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
+
+          if ! [[ "$LATEST_RELEASE" =~ ^LibCURL-v[0-9]+\.[0-9]+\.[0-9]+\+.+$ ]]; then
+            echo "::error::Could not obtain a valid LibCURL_jll release tag: ${LATEST_RELEASE:-<empty>}"
+            exit 1
+          fi
+
           echo "base=$BASE_VERSION" >> $GITHUB_OUTPUT
           echo "Latest upstream: $BASE_VERSION (from $LATEST_RELEASE)"
 
