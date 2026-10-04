@@ -34,7 +34,9 @@ operating systems.
 - macOS tests use `macos-14`, matching the macOS release-wheel runner and its
   Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
   runner image's preinstalled version cannot lag behind the libcurl version in
-  `pyproject.toml`.
+  `pyproject.toml`; it verifies the resulting version because an unrelated
+  Homebrew dependency-link warning can otherwise make a successful curl
+  upgrade exit nonzero.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.
   PyPy on Linux works correctly because the built-in cffi is preserved.

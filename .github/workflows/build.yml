@@ -96,14 +96,19 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Update Homebrew libcurl (macOS)
-        if: runner.os == 'macOS'
-        run: brew update && brew upgrade curl
-
       - name: Set version
         shell: bash
         run: |
           sed -i.bak "s/^version = \".*\"/version = \"${{ needs.setup.outputs.version }}\"/" pyproject.toml
+
+      - name: Update Homebrew libcurl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew upgrade curl || true
+          EXPECTED=$(python3 -c "import pathlib, re; m = re.search(r'^version = \"([0-9]+\.[0-9]+\.[0-9]+)\.', pathlib.Path('pyproject.toml').read_text(), re.M); print(m.group(1))")
+          INSTALLED=$("$(brew --prefix curl)/bin/curl" --version | sed -n '1s/curl \([^ ]*\).*/\1/p')
+          test "$INSTALLED" = "$EXPECTED"
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.1

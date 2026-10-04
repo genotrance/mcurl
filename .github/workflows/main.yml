@@ -78,7 +78,12 @@ jobs:
 
       - name: Update Homebrew libcurl (macOS)
         if: runner.os == 'macOS'
-        run: brew update && brew upgrade curl
+        run: |
+          brew update
+          brew upgrade curl || true
+          EXPECTED=$(python3 -c "import pathlib, re; m = re.search(r'^version = \"([0-9]+\.[0-9]+\.[0-9]+)\.', pathlib.Path('pyproject.toml').read_text(), re.M); print(m.group(1))")
+          INSTALLED=$("$(brew --prefix curl)/bin/curl" --version | sed -n '1s/curl \([^ ]*\).*/\1/p')
+          test "$INSTALLED" = "$EXPECTED"
 
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
