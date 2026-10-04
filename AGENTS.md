@@ -6,6 +6,9 @@
 
 ## Before pushing to GitHub
 
+- Work on `devel` by default. Never push to any remote branch, merge a pull
+  request, or otherwise change GitHub state unless the user explicitly
+  approves that specific action in the current request.
 - Test all affected configurations locally (if possible) before pushing to GitHub.
 - Cancel all old/running jobs on GitHub Actions before pushing new changes.
 - Monitor jobs after pushing until they complete and confirm they pass.

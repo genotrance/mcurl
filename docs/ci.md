@@ -26,11 +26,17 @@ operating systems.
 - Runs `make check` (pre-commit hooks + mypy)
 
 **`tests`** (matrix):
-- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-latest}`
+- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-14}`
 - Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.11}`
 - Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.11).
 - Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
+- macOS tests use `macos-14`, matching the macOS release-wheel runner and its
+  Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
+  runner image's preinstalled version cannot lag behind the libcurl version in
+  `pyproject.toml`; it verifies the resulting version because an unrelated
+  Homebrew dependency-link warning can otherwise make a successful curl
+  upgrade exit nonzero.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.
   PyPy on Linux works correctly because the built-in cffi is preserved.
@@ -95,6 +101,8 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
 2. **`build-sdist`** — builds the source distribution.
 3. **`build-wheels`** — cibuildwheel matrix across platforms/architectures.
    Linux aarch64 builds use native `ubuntu-24.04-arm` runners (no QEMU).
+   macOS refreshes Homebrew curl before compilation so its wheel uses the
+   release's declared libcurl version.
 4. **`publish`** — uploads to PyPI via
    [trusted publisher](https://docs.pypi.org/trusted-publishers/) and creates
    a git tag.
@@ -112,6 +120,9 @@ build matrix.
 - Runs monthly (1st of month, 06:00 UTC) and on manual dispatch.
 - Fetches the latest release tag from `genotrance/LibCURL_jll.jl` via the
   GitHub API.
+- Fails without dispatching a build if the API response does not contain a
+  valid release tag, preventing a transient lookup failure from rebuilding an
+  already-published version.
 - Compares the upstream libcurl version with the current version in
   `pyproject.toml`.
 - If a newer version is found, triggers `build.yml` via `workflow_dispatch`.

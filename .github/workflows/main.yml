@@ -57,17 +57,17 @@ jobs:
           - os: ubuntu-24.04-arm
             python-version: "pypy3.11"
           # macOS arm64
-          - os: macos-latest
+          - os: macos-14
             python-version: "3.9"
-          - os: macos-latest
+          - os: macos-14
             python-version: "3.10"
-          - os: macos-latest
+          - os: macos-14
             python-version: "3.11"
-          - os: macos-latest
+          - os: macos-14
             python-version: "3.12"
-          - os: macos-latest
+          - os: macos-14
             python-version: "3.13"
-          - os: macos-latest
+          - os: macos-14
             python-version: "3.14"
     defaults:
       run:
@@ -75,6 +75,15 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v7
+
+      - name: Update Homebrew libcurl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew upgrade curl || true
+          EXPECTED=$(python3 -c "import pathlib, re; m = re.search(r'^version = \"([0-9]+\.[0-9]+\.[0-9]+)\.', pathlib.Path('pyproject.toml').read_text(), re.M); print(m.group(1))")
+          INSTALLED=$("$(brew --prefix curl)/bin/curl" --version | sed -n '1s/curl \([^ ]*\).*/\1/p')
+          test "$INSTALLED" = "$EXPECTED"
 
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
@@ -120,7 +129,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v4.1.0
+        uses: pypa/cibuildwheel@v4.2.1
         env:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: ${{ matrix.cibw_build }}
