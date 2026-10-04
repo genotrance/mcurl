@@ -76,6 +76,10 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
 
+      - name: Update Homebrew libcurl (macOS)
+        if: runner.os == 'macOS'
+        run: brew update && brew upgrade curl
+
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
         with:

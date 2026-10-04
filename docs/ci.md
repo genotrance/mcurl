@@ -32,8 +32,9 @@ operating systems.
 - Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
 - macOS tests use `macos-14`, matching the macOS release-wheel runner and its
-  Homebrew libcurl version. This prevents a `macos-latest` image upgrade from
-  testing a different libcurl release than the one recorded in `pyproject.toml`.
+  Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
+  runner image's preinstalled version cannot lag behind the libcurl version in
+  `pyproject.toml`.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.
   PyPy on Linux works correctly because the built-in cffi is preserved.
@@ -98,6 +99,8 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
 2. **`build-sdist`** — builds the source distribution.
 3. **`build-wheels`** — cibuildwheel matrix across platforms/architectures.
    Linux aarch64 builds use native `ubuntu-24.04-arm` runners (no QEMU).
+   macOS refreshes Homebrew curl before compilation so its wheel uses the
+   release's declared libcurl version.
 4. **`publish`** — uploads to PyPI via
    [trusted publisher](https://docs.pypi.org/trusted-publishers/) and creates
    a git tag.
