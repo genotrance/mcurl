@@ -2,16 +2,26 @@
 
 ---
 
-## v8.22.0.1 — TBD
+## v8.23.0.1 — TBD
 
-- Updated to libcurl v8.22.0.
-- Enabled TCP keepalive and a configurable low-speed guard so stalled HTTP
-  responses no longer occupy a worker indefinitely, while CONNECT tunnels and
-  long transfers remain free of an overall deadline.
+- Updated to libcurl v8.23.0.
+- Enabled TCP keepalive on all connections and a low-speed guard on non-CONNECT
+  transfers, so a stalled HTTP response no longer occupies a worker
+  indefinitely while CONNECT tunnels and long transfers keep no overall
+  deadline. A plain-HTTP transfer that receives less than 1 byte/s for 120
+  seconds (for example a silent long-poll or server-sent events stream) is now
+  aborted; use `Curl.set_low_speed()` to change or disable this and
+  `Curl.set_keepalive()` to tune keepalive.
 
 ---
 
-## v8.21.0.1 — TBD
+## v8.22.0.1 — 2026-10-04
+
+- Updated to libcurl v8.22.0.
+
+---
+
+## v8.21.0.1 — 2026-07-21
 
 - Fixed `MCurl.select()` busy-loop at 100% CPU after a partial `send()` on a
   CONNECT tunnel.  A typo (`not data` instead of `not wdata`) prevented sockets
