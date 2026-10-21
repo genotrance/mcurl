@@ -25,7 +25,10 @@ The `ffibuilder` entry point in `mcurl/gen.py` drives the entire build:
    via [jbb](https://pypi.org/project/jbb/) (Linux/Windows) or uses Homebrew
    (macOS).
 2. Downloads Mozilla CA certificates via jbb.
-3. Preprocesses `curl.h` with gcc to extract the C API surface.
+3. Locates `curl/curl.h` from the directories jbb returns (the `include/`
+   sibling of each `lib/` or, on Windows, `bin/` directory), falling back to the
+   historical fixed extraction path, then preprocesses it with gcc to extract the
+   C API surface. This avoids depending on jbb's internal extraction layout.
 4. Generates cffi callback stubs for libcurl callbacks.
 5. Calls `cffi.FFI().set_source()` to produce the `_libcurl_cffi` extension
    module.

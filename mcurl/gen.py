@@ -348,6 +348,15 @@ def cffi_prep(cdef, inc, libs):
     return ffibuilder
 
 
+def find_curlh(libs, fallback):
+    "Find curl/curl.h in the include/ sibling of each jbb lib/ (bin/ on Windows) directory, else fallback"
+    derived = [os.path.join(os.path.dirname(d), "include", "curl", "curl.h") for d in libs]
+    for curlh in derived + [fallback]:
+        if os.path.isfile(curlh):
+            return curlh
+    raise RuntimeError(f"curl/curl.h not found at jbb-derived paths {derived} or fallback path {fallback}")
+
+
 def source_prep():
     # Download libcurl from JBB for Linux and Windows
     key = jbb.get_key()
@@ -368,8 +377,8 @@ def source_prep():
                     lib_dirs.append(lib_dir)
             libs = lib_dirs
 
-        # Header file location
-        curlh = f"{outdir}{os.sep}LibCURL{os.sep}include{os.sep}curl{os.sep}curl.h"
+        # Header file location, derived from the directories jbb returned
+        curlh = find_curlh(libs, f"{outdir}{os.sep}LibCURL{os.sep}include{os.sep}curl{os.sep}curl.h")
     else:
         prefix = subprocess.check_output("brew --prefix", shell=True, text=True).strip()
         deps = ["curl"] + subprocess.check_output("brew deps -n --installed curl", shell=True, text=True).splitlines()
