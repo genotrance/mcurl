@@ -32,6 +32,15 @@ def dprint(_):
 
 MCURL = None
 
+# Conservative defaults: detect genuinely dead peers without imposing a total
+# transfer deadline on long-running downloads.
+KEEPALIVE_IDLE = 30
+KEEPALIVE_INTERVAL = 10
+KEEPALIVE_COUNT = 3
+LOW_SPEED_LIMIT = 1
+LOW_SPEED_TIME = 120
+MULTI_SELECT_TIMEOUT = 1.0
+
 __all__ = [
     "Curl",
     "MCurl",
@@ -385,6 +394,8 @@ class Curl:
         # Disable signal-based timeouts - required for thread safety
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_NOSIGNAL, py2cbool(True))
 
+        self.set_keepalive(KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_COUNT)
+
         # SSL CAINFO
         if sys.platform != "win32":
             # libcurl uses schannel on Windows which uses system CA certs
@@ -423,6 +434,9 @@ class Curl:
         else:
             dprint(self.easyhash + ": Unknown method: " + method)
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_CUSTOMREQUEST, self._keepstr(method))
+
+        if not self.is_connect:
+            self.set_low_speed(LOW_SPEED_LIMIT, LOW_SPEED_TIME)
 
         self.url = url
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_URL, self._keepstr(url))
@@ -763,6 +777,29 @@ class Curl:
     def set_timeout(self, seconds):
         "Set total transfer timeout in seconds (0 = no timeout)"
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TIMEOUT, py2clong(seconds))
+
+    def set_keepalive(self, idle=KEEPALIVE_IDLE, interval=KEEPALIVE_INTERVAL, count=KEEPALIVE_COUNT):
+        """Configure TCP keepalive probes; pass idle=0 to disable them.
+
+        TCP_KEEPCNT was added in libcurl 8.9.0, so older system libcurl
+        builds simply retain their platform default probe count.
+        """
+        if min(idle, interval, count) < 0:
+            raise ValueError("Keepalive values cannot be negative")
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TCP_KEEPALIVE, py2clong(idle != 0))
+        if idle:
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TCP_KEEPIDLE, py2clong(idle))
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_TCP_KEEPINTVL, py2clong(interval))
+            keepcnt = getattr(libcurl, "CURLOPT_TCP_KEEPCNT", None)
+            if keepcnt is not None:
+                libcurl.curl_easy_setopt(self.easy, keepcnt, py2clong(count))
+
+    def set_low_speed(self, limit=LOW_SPEED_LIMIT, seconds=LOW_SPEED_TIME):
+        """Abort transfers below limit bytes/second for seconds; zero disables."""
+        if limit < 0 or seconds < 0:
+            raise ValueError("Low-speed values cannot be negative")
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_LOW_SPEED_LIMIT, py2clong(limit))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_LOW_SPEED_TIME, py2clong(seconds))
 
     # HTTP server auth (section 6)
 
@@ -1348,6 +1385,8 @@ class MCurl:
             rsnap_set = set(self.rlist)
             wsnap_set = set(self.wlist)
             timer = self.timer
+            if timer is None:
+                timer = MULTI_SELECT_TIMEOUT
 
         rsnap = list(rsnap_set)
         wsnap = list(wsnap_set)

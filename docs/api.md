@@ -85,6 +85,8 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `setopt(option, value)` | Set any CURLOPT option; auto-converts Python str/int/bool to the correct cffi type |
+| `set_keepalive(idle=30, interval=10, count=3)` | Configure TCP keepalive probes; an idle value of 0 disables keepalive |
+| `set_low_speed(limit=1, seconds=120)` | Configure the low-speed stall guard; zero disables it |
 | `getinfo(info)` | Get any CURLINFO value; returns `(CURLcode, value)` with auto type inference |
 | `unsetopt(option)` | Reset a CURLOPT option to its libcurl default (best-effort) |
 

@@ -15,6 +15,14 @@ Tests are split across multiple files in `tests/`:
 | `test_utils.py` | Utility functions: `py2cstr`, `sanitized`, version, features, dependency checks |
 | `test_raw.py` | Raw libcurl cffi API tests (uses `mcurl.ffi` / `mcurl.libcurl`) |
 | `test_api.py` | New API surface: `setopt`/`getinfo`, `unsetopt`, timeout, auth, cookies, redirects, encoding, `dup`, pause/unpause, xferinfo/seek callbacks, context managers, convenience getters, `Curl.strerror`/`MCurl.strerror` |
+| `test_dead_connection.py` | Local fake-upstream tests for stalled bodies, slow transfers, CONNECT tunnels, keepalive socket settings, and bounded multi waits |
+
+The dead-connection tests use only loopback sockets. They verify that keepalive
+is enabled and configured on the actual libcurl socket, but cannot reproduce a
+network black hole: a userspace peer that stops reading still has its kernel
+acknowledge TCP probes, and process suspension has the same limitation.
+End-to-end keepalive expiry therefore requires a packet-dropping firewall or a
+real failed network path and is not asserted by the unprivileged suite.
 
 ---
 

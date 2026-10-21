@@ -5,6 +5,9 @@
 ## v8.22.0.1 — TBD
 
 - Updated to libcurl v8.22.0.
+- Enabled TCP keepalive and a configurable low-speed guard so stalled HTTP
+  responses no longer occupy a worker indefinitely, while CONNECT tunnels and
+  long transfers remain free of an overall deadline.
 
 ---
 
