@@ -105,9 +105,11 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
    Linux aarch64 builds use native `ubuntu-24.04-arm` runners (no QEMU).
    macOS refreshes Homebrew curl before compilation so its wheel uses the
    release's declared libcurl version.
-4. **`publish`** — uploads to PyPI via
-   [trusted publisher](https://docs.pypi.org/trusted-publishers/) and creates
-   a git tag.
+4. **`publish`** — first verifies that the resolved release version matches
+   `pyproject.toml` at the triggering commit, then uploads to PyPI via
+   [trusted publisher](https://docs.pypi.org/trusted-publishers/) and tags that
+   same commit. This prevents an upstream-triggered release from publishing a
+   version whose tag would declare an older version in source control.
 
 Publishing only happens on pushes to `main`.
 
