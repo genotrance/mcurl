@@ -45,8 +45,10 @@ The `ffibuilder` entry point in `mcurl/gen.py` drives the entire build:
 
 ### Build backend
 
-The build backend is `setuptools.build_meta` with `cffi`, `jbb`, and
-`setuptools` as build-time requirements.
+The build backend is `setuptools.build_meta` with `cffi`, `jbb>=0.1.6`, and
+`setuptools` as build-time requirements. The minimum jbb version includes its
+version-ordered tag handling, so a requested libcurl release resolves
+consistently.
 
 ### Wheel tag
 
@@ -107,6 +109,11 @@ Several configurations are skipped because they are unsupported or broken:
 
 Platform-specific `repair-wheel-command` entries bundle shared libraries into
 wheels using auditwheel (Linux), delocate (macOS), and delvewheel (Windows).
+The Linux and Windows commands read the package version from `pyproject.toml`,
+remove the wrapper patch octet, and request that exact
+`LibCURL-v<base-version>` release from the `genotrance` project. This keeps
+the repaired wheel's library aligned with the extension even when its jbb
+cache starts empty.
 
 ---
 

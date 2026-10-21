@@ -52,8 +52,10 @@ The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that Python 3.14 and PyPy can be installed.
 - Installs `uv`, syncs dependencies, and builds the extension.
 - For PyPy: skips installing `cffi` from PyPI (PyPy ships its own built-in cffi).
-- On Linux: a separate step sets `LD_LIBRARY_PATH` to point at the jbb-
-  downloaded libcurl so the extension can load at test time.
+- On Linux: a separate step reads the base libcurl version from
+  `pyproject.toml`, then sets `LD_LIBRARY_PATH` to the matching
+  `genotrance` jbb download so the extension can load at test time. This
+  avoids relying on a prior build having populated the same jbb cache.
 - On macOS: a separate step sets `DYLD_LIBRARY_PATH` to point at the Homebrew
   libcurl directories for test time. At build time, rpaths are embedded via
   `-Wl,-rpath` so installed wheels do not need `DYLD_LIBRARY_PATH` at runtime.

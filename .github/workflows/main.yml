@@ -93,7 +93,8 @@ jobs:
       - name: Set LD_LIBRARY_PATH for jbb libcurl (Linux)
         if: runner.os == 'Linux'
         run: |
-          LIB_DIRS=$(uv run python -m jbb -d "$RUNNER_TEMP/mcurl/$(uv run python -c 'import jbb; print(jbb.get_key())')" -q LibCURL)
+          LIBCURL_VERSION=$(uv run python -c 'version = next(line.split("=", 1)[1].strip().strip("\"") for line in open("pyproject.toml") if line.startswith("version")); print(version.rsplit(".", 1)[0])')
+          LIB_DIRS=$(uv run python -m jbb -d "$RUNNER_TEMP/mcurl/$(uv run python -c 'import jbb; print(jbb.get_key())')" -q -p genotrance "LibCURL-v$LIBCURL_VERSION")
           echo "LD_LIBRARY_PATH=${LIB_DIRS}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Set DYLD_LIBRARY_PATH for brew libcurl (macOS)
@@ -134,7 +135,7 @@ jobs:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: ${{ matrix.cibw_build }}
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
-            uv pip install delvewheel jbb &&
-            python -c "import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\mcurl\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])"
+            uv pip install delvewheel 'jbb>=0.1.6' &&
+            python -c "import os, subprocess, jbb; version = next(line.split('=', 1)[1].strip().strip(chr(34)) for line in open('pyproject.toml') if line.startswith('version')); subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb(f'LibCURL-v{version.rsplit(chr(46), 1)[0]}', outdir=os.environ['TMP']+'\\mcurl\\'+jbb.get_key(), project='genotrance', quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])"
           CIBW_TEST_REQUIRES: "pytest pytest-httpbin"
           CIBW_TEST_COMMAND: "pytest {project}/tests -q"
