@@ -339,6 +339,9 @@ class Curl:
     is_tunnel = False
     is_upload = False
 
+    # Proxy for which this handle holds the auth retry probe slot
+    _probe_proxy = None
+
     @staticmethod
     def strerror(code):
         "Return human-readable string for a CURLcode error"
@@ -367,6 +370,9 @@ class Curl:
 
     def __del__(self):
         "Destructor - clean up resources"
+        if self._probe_proxy is not None and MCURL is not None:
+            # Handle discarded before do() completed - free the probe slot
+            MCURL._release_probe(self)
         if libcurl is not None and self.easy is not None:
             if self.headers is not None:
                 # Free curl headers if any
@@ -458,6 +464,8 @@ class Curl:
         is re-established.
         """
         dprint(self.easyhash + ": Resetting curl")
+        if self._probe_proxy is not None:
+            MCURL._release_probe(self)
         libcurl.curl_easy_reset(self.easy)
         self.sock_fd = None
 
@@ -503,8 +511,13 @@ class Curl:
         self.is_tunnel = tunnel
 
     def set_proxy(self, proxy, port=0, noproxy=None):
-        "Set proxy server; returns False if this proxy has exceeded the auth failure threshold"
-        if proxy in MCURL.failed and MCURL.failed[proxy] >= MCURL.failure_threshold:
+        """Set proxy server; returns False if this proxy has exceeded the auth failure threshold
+
+        With MCurl auth_retry enabled, a blocked proxy admits one handle as a
+        probe once the retry interval has elapsed; all other handles are
+        refused until that probe completes in MCurl.do().
+        """
+        if not MCURL._admit_proxy(self, proxy):
             dprint(
                 self.easyhash
                 + f": Authentication issues with this proxy server (failed {MCURL.failure_threshold} times)"
@@ -1253,8 +1266,11 @@ class MCurl:
         "Return human-readable string for a CURLMcode error"
         return ffi.string(libcurl.curl_multi_strerror(code)).decode("utf-8")
 
-    def __init__(self, debug_print=None):
-        "Initialize multi interface"
+    def __init__(self, debug_print=None, auth_retry=0, auth_retry_max=None):
+        """Initialize multi interface
+
+        auth_retry and auth_retry_max are passed to set_auth_retry().
+        """
         global dprint
         if debug_print is not None:
             dprint = debug_print
@@ -1287,6 +1303,13 @@ class MCurl:
         self.wlist = set()
         self._lock = threading.Lock()
 
+        # Auth retry state for blocked proxies; failed stays the public count.
+        # RLock since Curl.__del__ can release a probe from GC in any thread.
+        self._auth_lock = threading.RLock()
+        self._blocked = {}  # proxy -> (blocked since monotonic time, interval)
+        self._probe = {}  # proxy -> easyhash of in-flight probe
+        self.set_auth_retry(auth_retry, auth_retry_max)
+
     def setopt(self, option, value):
         "Configure a multi option (socket/timer callbacks are reserved by mcurl)"
         if option in (libcurl.CURLMOPT_SOCKETFUNCTION, libcurl.CURLMOPT_TIMERFUNCTION):
@@ -1298,6 +1321,93 @@ class MCurl:
         if threshold < 1:
             raise ValueError("Threshold must be at least 1")
         self.failure_threshold = threshold
+
+    def set_auth_retry(self, interval, max_interval=None):
+        """Retry a proxy blocked by auth failures after interval seconds
+
+        Once the interval has elapsed since the proxy was blocked, exactly one
+        request is let through as a probe; others are refused until it
+        completes. A successful response unblocks the proxy, a 407 blocks it
+        for another interval, doubled per failed probe up to max_interval if
+        that is larger than interval. 0 (default) blocks until
+        reset_proxy_failures() is called.
+        """
+        if interval < 0:
+            raise ValueError("Auth retry interval cannot be negative")
+        if max_interval is None:
+            max_interval = interval
+        elif max_interval < interval:
+            raise ValueError("Auth retry max interval cannot be less than interval")
+        with self._auth_lock:
+            self.auth_retry = interval
+            self.auth_retry_max = max_interval
+
+    def reset_proxy_failures(self, proxy=None):
+        "Clear auth failure state for proxy, or for all proxies if None"
+        with self._auth_lock:
+            if proxy is None:
+                self.failed.clear()
+                self._blocked.clear()
+                self._probe.clear()
+            else:
+                self.failed.pop(proxy, None)
+                self._blocked.pop(proxy, None)
+                self._probe.pop(proxy, None)
+
+    def _admit_proxy(self, curl, proxy):
+        # Decide whether curl may use proxy given its auth failure state
+        with self._auth_lock:
+            if self.failed.get(proxy, 0) < self.failure_threshold:
+                self._blocked.pop(proxy, None)
+                return True
+            if self.auth_retry <= 0:
+                return False
+            holder = self._probe.get(proxy)
+            if holder is not None:
+                # Only the probe itself (setting the proxy again) is admitted
+                return holder == curl.easyhash
+            now = time.monotonic()
+            # Blocked by failed being set directly - start the clock now
+            since, interval = self._blocked.setdefault(proxy, (now, self.auth_retry))
+            if now - since < interval:
+                return False
+            dprint(curl.easyhash + f": Auth retry probe for {proxy} after {interval}s")
+            self._probe[proxy] = curl.easyhash
+            curl._probe_proxy = proxy
+            return True
+
+    def _release_probe(self, curl):
+        # Free the probe slot held by curl; returns True if it held one
+        with self._auth_lock:
+            proxy = curl._probe_proxy
+            curl._probe_proxy = None
+            if proxy is not None and self._probe.get(proxy) == curl.easyhash:
+                self._probe.pop(proxy)
+                return True
+            return False
+
+    def _record_proxy_auth(self, curl, auth_failed):
+        # Update proxy auth state after do(): auth_failed is True for a 407
+        # with auth, False for any other response, None if inconclusive
+        proxy = curl.proxy
+        with self._auth_lock:
+            probe = self._release_probe(curl)
+            if auth_failed is False:
+                self.failed[proxy] = 0
+                self._blocked.pop(proxy, None)
+                return
+            interval = self._blocked.get(proxy, (0, self.auth_retry))[1]
+            if auth_failed:
+                self.failed[proxy] = self.failed.get(proxy, 0) + 1
+                if self.failed[proxy] < self.failure_threshold:
+                    return
+                if probe:
+                    # Back off after each failed probe
+                    interval = min(max(interval, self.auth_retry) * 2, self.auth_retry_max)
+            elif not probe:
+                return
+            # Block (again) for interval; an inconclusive probe keeps the interval
+            self._blocked[proxy] = (time.monotonic(), interval)
 
     # Callbacks
 
@@ -1486,6 +1596,7 @@ class MCurl:
         # Only check proxy auth when libcurl itself succeeded - a non-OK cerr
         # means the HTTP response code from get_response() is unreliable and
         # must not be used to judge authentication status (px#250)
+        auth_failed = None
         if curl.proxy is not None and curl.cerr == libcurl.CURLE_OK:
             ret, codep = curl.get_response()
             if ret == 0 and codep == 407:
@@ -1502,7 +1613,7 @@ class MCurl:
                     curl.errstr += out + "; "
 
                     # Increment failure count for this proxy; block after threshold attempts
-                    self.failed[curl.proxy] = self.failed.get(curl.proxy, 0) + 1
+                    auth_failed = True
                 else:
                     # Setup client to authenticate directly with upstream proxy
                     dprint(curl.easyhash + ": Client to authenticate with upstream proxy")
@@ -1511,7 +1622,9 @@ class MCurl:
                         curl.resp = codep
             else:
                 # Successful (or non‑auth) response – reset failure counter for this proxy
-                self.failed[curl.proxy] = 0
+                auth_failed = False
+        if curl.proxy is not None:
+            self._record_proxy_auth(curl, auth_failed)
 
         if curl.is_connect and curl.sock_fd is None:
             # Get the active socket for select()

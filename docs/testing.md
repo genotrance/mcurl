@@ -16,6 +16,7 @@ Tests are split across multiple files in `tests/`:
 | `test_raw.py` | Raw libcurl cffi API tests (uses `mcurl.ffi` / `mcurl.libcurl`) |
 | `test_gen.py` | Build helper `find_curlh` in `mcurl/gen.py`: header lookup from jbb directories and fallback (skipped if jbb is not installed) |
 | `test_api.py` | New API surface: `setopt`/`getinfo`, `unsetopt`, timeout, auth, cookies, redirects, encoding, `dup`, pause/unpause, xferinfo/seek callbacks, context managers, convenience getters, `Curl.strerror`/`MCurl.strerror` |
+| `test_auth_retry.py` | Local fake-proxy tests for proxies blocked after 407s: default latch, single probe per interval under a concurrent burst, recovery, re-block and backoff, probe slot release, `reset_proxy_failures()` |
 | `test_dead_connection.py` | Local fake-upstream tests for stalled bodies, slow transfers, CONNECT tunnels, keepalive socket settings, and bounded multi waits |
 
 The dead-connection tests use only loopback sockets. They verify that keepalive

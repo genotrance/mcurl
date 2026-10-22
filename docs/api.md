@@ -220,6 +220,21 @@ MCurl(debug_print=None)
 ```
 
 Pass a callable as `debug_print` to enable debug output (e.g. `MCurl(debug_print=print)`).
+`auth_retry` and `auth_retry_max` are passed to `set_auth_retry()`.
+
+### Proxy auth failures
+
+When a request with proxy auth configured receives a 407, the proxy's failure
+count increases; any other response resets it. Once the count reaches the
+failure threshold, `Curl.set_proxy()` returns `False` for that proxy. By
+default this lasts until `reset_proxy_failures()` is called. With an auth
+retry interval set, the first `set_proxy()` call after the interval becomes a
+probe while every other caller is still refused, so a burst of requests sends
+only one authentication attempt upstream. The probe's outcome in `do()`
+decides what happens next: a non-407 response unblocks the proxy, a 407 blocks
+it for another (possibly doubled) interval, and a libcurl error blocks it for
+the same interval. A probe handle that is reset or discarded before `do()`
+completes frees the slot for the next caller.
 
 ### Static methods
 
@@ -233,6 +248,8 @@ Pass a callable as `debug_print` to enable debug output (e.g. `MCurl(debug_print
 |--------|-------------|
 | `setopt(option, value)` | Configure a multi option (socket/timer callbacks are reserved by mcurl) |
 | `set_failure_threshold(threshold)` | Set number of auth failures before blocking a proxy (default: 3) |
+| `set_auth_retry(interval, max_interval=None)` | Retry a blocked proxy after `interval` seconds with a single probe request; failed probes double the interval up to `max_interval` (default: 0, never retry) |
+| `reset_proxy_failures(proxy=None)` | Clear auth failure state for one proxy, or all proxies if `None` |
 | `add(curl)` | Add a `Curl` handle to the multi instance for concurrent execution |
 | `do(curl)` | Add a `Curl` handle and perform until completion; returns `True` on success |
 | `remove(curl)` | Remove a completed `Curl` handle from the multi instance |
@@ -260,6 +277,8 @@ with mcurl.MCurl() as m:
 | `proxyauth` | dict | Cached `{proxy: auth_method}` values |
 | `failed` | dict | `{proxy: failure_count}` for auth failures |
 | `failure_threshold` | int | Max auth failures before blocking (default: 3) |
+| `auth_retry` | float | Seconds before a blocked proxy gets a probe request (default: 0, never) |
+| `auth_retry_max` | float | Cap for the doubled retry interval after failed probes |
 
 ---
 
