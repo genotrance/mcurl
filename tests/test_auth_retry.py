@@ -13,9 +13,10 @@ TARGET = "http://auth-retry.invalid/"
 
 class _FakeProxy(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 512  # Bursts of hundreds of simultaneous connects
 
-    def __init__(self):
-        super().__init__(("127.0.0.1", 0), _ProxyHandler)
+    def __init__(self, port=0):
+        super().__init__(("127.0.0.1", port), _ProxyHandler)
         self.mode = "deny"  # deny: 407, allow: 200, drop: close without response
         self.delay = 0
         self.attempts = 0  # Requests carrying Proxy-Authorization
