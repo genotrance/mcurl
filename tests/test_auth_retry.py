@@ -1,5 +1,6 @@
 """Auth retry for proxies blocked after repeated 407s, against a local fake proxy."""
 
+import gc
 import http.server
 import threading
 import time
@@ -362,6 +363,23 @@ def test_discarded_probe_frees_slot(proxy, multi):
     assert probe is not None
     assert _curl(proxy) is None
     del probe
+    for _ in range(50):
+        gc.collect()
+        if _curl(proxy) is not None:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("probe slot not freed by GC")
+
+
+def test_close_frees_probe_slot(proxy, multi):
+    multi.set_auth_retry(0.01)
+    _force_block(multi, proxy)
+    probe = _curl(proxy)
+    assert probe is not None
+    assert _curl(proxy) is None
+    probe.close()
+    assert multi._probe == {}
     assert _curl(proxy) is not None
 
 
