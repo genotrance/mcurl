@@ -15,8 +15,9 @@
 - Added `MCurl.set_auth_retry()` (or `MCurl(auth_retry=..., auth_retry_max=...)`)
   so a proxy blocked after repeated 407s is retried after an interval with
   exactly one probe request, even under concurrent load, and unblocked if it
-  succeeds. Added `MCurl.reset_proxy_failures()` to clear the block. The
-  default keeps a blocked proxy blocked as before.
+  succeeds. It also recognizes 407 responses to HTTPS proxy CONNECT requests.
+  Added `MCurl.reset_proxy_failures()` to clear the block. The default keeps a
+  blocked proxy blocked as before.
 
 ---
 

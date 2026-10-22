@@ -341,6 +341,7 @@ class Curl:
 
     # Proxy for which this handle holds the auth retry probe slot
     _probe_proxy = None
+    _stopped = False
 
     @staticmethod
     def strerror(code):
@@ -360,6 +361,7 @@ class Curl:
 
         self.easy = libcurl.curl_easy_init()
         self.easyhash = gethash(self.easy)
+        self._stopped = False
         self._keepalive = []
         self._xferinfo_fn = None
         self._seek_fn = None
@@ -483,6 +485,7 @@ class Curl:
         self._seek_fn = None
 
         self.cerr = libcurl.CURLE_OK
+        self._stopped = False
         self.done = False
         self.errstr = ""
         self.resp = 503
@@ -1101,6 +1104,12 @@ class Curl:
             ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_RESPONSE_CODE, codep)
         return ret, codep[0]
 
+    def get_connect_response(self):
+        "Return (CURLcode, HTTP status) from a proxy CONNECT request"
+        codep = ffi.new("long *")
+        ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_HTTP_CONNECTCODE, codep)
+        return ret, codep[0]
+
     def get_activesocket(self):
         "Return (CURLcode, socket_fd) for this handle's active connection"
         if sys.platform == "win32":
@@ -1469,6 +1478,8 @@ class MCurl:
 
         if len(errstr) != 0:
             curl.errstr += errstr + "; "
+            if errstr == "Stopped":
+                curl._stopped = True
 
         dprint(curl.easyhash + ": Remove handle: " + curl.errstr)
         libcurl.curl_multi_remove_handle(self._multi, curl.easy)
@@ -1593,13 +1604,17 @@ class MCurl:
             curl.resp = 503
             curl.errstr += f"Curl error {curl.cerr}"
 
-        # Only check proxy auth when libcurl itself succeeded - a non-OK cerr
-        # means the HTTP response code from get_response() is unreliable and
-        # must not be used to judge authentication status (px#250)
+        # A transfer without a real response is inconclusive. In particular,
+        # stop() leaves CURLE_OK and a zero response code, so it must not clear
+        # a blocked proxy. A CONNECT 407 is the exception: libcurl reports it
+        # as CURLE_COULDNT_CONNECT, but the proxy's auth response is reliable.
         auth_failed = None
-        if curl.proxy is not None and curl.cerr == libcurl.CURLE_OK:
+        if curl.proxy is not None:
+            aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
             ret, codep = curl.get_response()
-            if ret == 0 and codep == 407:
+            if curl.cerr != libcurl.CURLE_OK and not aborted:
+                ret, codep = curl.get_connect_response()
+            if not aborted and ret == libcurl.CURLE_OK and codep == 407:
                 # Proxy authentication required
                 if curl.auth is not None:
                     # Proxy auth did not work for whatever reason
@@ -1620,7 +1635,7 @@ class MCurl:
                     if not curl.is_connect:
                         # curl.errstr not set else connection will get closed during auth
                         curl.resp = codep
-            else:
+            elif curl.cerr == libcurl.CURLE_OK and not aborted and ret == libcurl.CURLE_OK and codep != 0:
                 # Successful (or non‑auth) response – reset failure counter for this proxy
                 auth_failed = False
         if curl.proxy is not None:

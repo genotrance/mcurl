@@ -21,6 +21,7 @@ class _FakeProxy(http.server.ThreadingHTTPServer):
         self.delay = 0
         self.attempts = 0  # Requests carrying Proxy-Authorization
         self.lock = threading.Lock()
+        self.started = threading.Event()
 
     @property
     def url(self):
@@ -33,28 +34,48 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def do_GET(self):
+    def _auth_mode(self):
         server = self.server
         if self.headers.get("Proxy-Authorization") is not None:
             with server.lock:
                 server.attempts += 1
+            server.started.set()
             time.sleep(server.delay)
-            if server.mode == "drop":
-                self.close_connection = True
-                return
-            if server.mode == "allow":
-                body = b"ok"
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(body)
-                return
+            return server.mode
+        return "deny"
+
+    def _deny(self):
         self.send_response(407)
         self.send_header("Proxy-Authenticate", 'Basic realm="fake"')
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()
+
+    def do_GET(self):
+        mode = self._auth_mode()
+        if mode == "drop":
+            self.close_connection = True
+        elif mode == "allow":
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self._deny()
+
+    def do_CONNECT(self):
+        mode = self._auth_mode()
+        if mode == "drop":
+            self.close_connection = True
+        elif mode == "allow":
+            # CONNECT_ONLY considers the established tunnel a success; no
+            # upstream server is needed for this proxy-auth regression test.
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self._deny()
 
 
 @pytest.fixture
@@ -88,6 +109,27 @@ def _request(multi, proxy):
     curl = _curl(proxy)
     if curl is None:
         return None
+    multi.do(curl)
+    return curl.resp if curl.errstr else curl.get_response()[1]
+
+
+def _connect_request(multi, proxy):
+    # An explicit CONNECT makes the fake proxy exercise HTTP_CONNECTCODE.
+    curl = mcurl.Curl("auth-retry.invalid:443", method="CONNECT")
+    if not curl.set_proxy(proxy.url):
+        return None
+    curl.set_auth("user", "pass", auth="BASIC")
+    multi.do(curl)
+    return curl.resp if curl.errstr else curl.get_response()[1]
+
+
+def _https_request(multi, proxy):
+    # HTTPS causes libcurl to issue a proxy CONNECT before the TLS handshake.
+    curl = mcurl.Curl("https://auth-retry.invalid/")
+    curl.buffer()
+    if not curl.set_proxy(proxy.url):
+        return None
+    curl.set_auth("user", "pass", auth="BASIC")
     multi.do(curl)
     return curl.resp if curl.errstr else curl.get_response()[1]
 
@@ -197,6 +239,52 @@ def test_inconclusive_probe_reblocks(proxy, multi):
     time.sleep(0.4)
     proxy.mode = "allow"
     assert _request(multi, proxy) == 200
+
+
+def test_stopped_probe_keeps_proxy_blocked_and_frees_slot(proxy, multi):
+    multi.set_auth_retry(0.01)
+    _block(multi, proxy)
+    time.sleep(0.05)
+    proxy.mode = "allow"
+    proxy.delay = 1
+    proxy.started.clear()
+    probe = _curl(proxy)
+    assert probe is not None
+    result = []
+    worker = threading.Thread(target=lambda: result.append(multi.do(probe)))
+    worker.start()
+    assert proxy.started.wait(2)
+    multi.stop(probe)
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert result == [False]
+    assert probe.errstr == "Stopped; "
+    assert multi.failed[proxy.url] == multi.failure_threshold
+    assert proxy.url in multi._blocked
+    assert multi._probe == {}
+
+
+def test_connect_407_latches_probes_and_recovers(proxy, multi):
+    multi.set_auth_retry(0.05)
+    assert [_https_request(multi, proxy) for _ in range(multi.failure_threshold)] == [401] * multi.failure_threshold
+    assert multi.failed[proxy.url] == multi.failure_threshold
+    assert _https_request(multi, proxy) is None
+
+    time.sleep(0.1)
+    proxy.delay = 0.2
+    results = _concurrent(lambda: _https_request(multi, proxy), 10)
+    admitted = [response for response in results if response is not None]
+    refused = len(results) - len(admitted)
+    assert admitted == [401]
+    assert refused == 9
+    assert proxy.attempts == multi.failure_threshold + 1
+
+    time.sleep(0.1)
+    proxy.mode = "allow"
+    assert _connect_request(multi, proxy) == 200
+    assert multi.failed[proxy.url] == 0
+    assert proxy.url not in multi._blocked
 
 
 def _concurrent(func, count):
