@@ -370,6 +370,11 @@ class Curl:
 
         self._setup(url, method, request_version, connect_timeout)
 
+    def close(self):
+        "Deterministically release the auth retry probe slot held by this handle, if any"
+        if self._probe_proxy is not None and MCURL is not None:
+            MCURL._release_probe(self)
+
     def __del__(self):
         "Destructor - clean up resources"
         if self._probe_proxy is not None and MCURL is not None:
@@ -1365,6 +1370,8 @@ class MCurl:
 
     def _admit_proxy(self, curl, proxy):
         # Decide whether curl may use proxy given its auth failure state
+        if curl._probe_proxy is not None and curl._probe_proxy != proxy:
+            self._release_probe(curl)
         with self._auth_lock:
             if self.failed.get(proxy, 0) < self.failure_threshold:
                 self._blocked.pop(proxy, None)
@@ -1490,6 +1497,8 @@ class MCurl:
         "Remove a completed Curl handle from the multi instance"
         with self._lock:
             self._remove_handle(curl)
+        if curl._probe_proxy is not None:
+            self._release_probe(curl)
 
     def stop(self, curl: Curl):
         "Abort a running Curl handle and remove it from the multi instance"
