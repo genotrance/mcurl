@@ -26,12 +26,12 @@ operating systems.
 - Runs `make check` (pre-commit hooks + mypy)
 
 **`tests`** (matrix):
-- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-14}`
+- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-15}`
 - Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.11}`
 - Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.11).
 - Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
-- macOS tests use `macos-14`, matching the macOS release-wheel runner and its
+- macOS tests use `macos-15`, matching the macOS release-wheel runner and its
   Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
   runner image's preinstalled version cannot lag behind the libcurl version in
   `pyproject.toml`; it verifies the resulting version because an unrelated
