@@ -8,7 +8,7 @@ Three workflows power the CI/CD pipeline:
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
-| CI | `main.yml` | push to `main`/`devel`, PRs | Code quality + test matrix |
+| CI | `main.yml` | push to `main`/`devel`/`working`, PRs | Code quality + test matrix |
 | Build wheels | `build.yml` | push to `main`/`devel`, manual dispatch | Build + publish to PyPI |
 | Check upstream | `check-upstream.yml` | monthly cron, manual | Detect new LibCURL_jll.jl releases |
 
@@ -17,7 +17,8 @@ Three workflows power the CI/CD pipeline:
 ## CI (`main.yml`)
 
 Runs code quality checks and the test suite across multiple Python versions and
-operating systems.
+operating systems. Pushes to `working` run the same checks so work can be
+validated before it is promoted to `devel`.
 
 ### Jobs
 
@@ -143,7 +144,7 @@ current without manual tracking.
 
 ## Deployment flow
 
-1. Push to `devel` → CI runs (quality + test matrix)
+1. Push to `devel` or `working` → CI runs (quality + test matrix)
 2. Optionally trigger `build.yml` manually on `devel` to verify wheel builds
 3. If CI green → merge `devel` → `main`
 4. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release
