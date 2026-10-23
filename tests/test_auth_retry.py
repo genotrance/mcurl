@@ -408,7 +408,9 @@ def test_reset_clears_in_flight_probe(proxy, multi):
 
 
 def test_auth_retry_options():
-    m = mcurl.MCurl(auth_retry=5, auth_retry_max=60)
+    m = mcurl.MCurl()
+    assert (m.auth_retry, m.auth_retry_max) == (0, 0)
+    m.set_auth_retry(5, max_interval=60)
     assert (m.auth_retry, m.auth_retry_max) == (5, 60)
     m.set_auth_retry(2)
     assert (m.auth_retry, m.auth_retry_max) == (2, 2)

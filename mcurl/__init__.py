@@ -1280,11 +1280,8 @@ class MCurl:
         "Return human-readable string for a CURLMcode error"
         return ffi.string(libcurl.curl_multi_strerror(code)).decode("utf-8")
 
-    def __init__(self, debug_print=None, auth_retry=0, auth_retry_max=None):
-        """Initialize multi interface
-
-        auth_retry and auth_retry_max are passed to set_auth_retry().
-        """
+    def __init__(self, debug_print=None):
+        """Initialize multi interface"""
         global dprint
         if debug_print is not None:
             dprint = debug_print
@@ -1313,6 +1310,8 @@ class MCurl:
         self.proxyauth = {}
         self.failed = {}
         self.failure_threshold = 3
+        self.auth_retry = 0
+        self.auth_retry_max = 0
         self.rlist = set()
         self.wlist = set()
         self._lock = threading.Lock()
@@ -1322,7 +1321,6 @@ class MCurl:
         self._auth_lock = threading.RLock()
         self._blocked = {}  # proxy -> (blocked since monotonic time, interval)
         self._probe = {}  # proxy -> easyhash of in-flight probe
-        self.set_auth_retry(auth_retry, auth_retry_max)
 
     def setopt(self, option, value):
         "Configure a multi option (socket/timer callbacks are reserved by mcurl)"
@@ -1337,13 +1335,15 @@ class MCurl:
         self.failure_threshold = threshold
 
     def set_auth_retry(self, interval, max_interval=None):
-        """Retry a proxy blocked by auth failures after interval seconds
+        """Configure proxy auth retry intervals in seconds.
 
-        Once the interval has elapsed since the proxy was blocked, exactly one
-        request is let through as a probe; others are refused until it
-        completes. A successful response unblocks the proxy, a 407 blocks it
-        for another interval, doubled per failed probe up to max_interval if
-        that is larger than interval. 0 (default) blocks until
+        ``interval`` and ``max_interval`` accept integers or floats, including
+        fractional seconds. Once the interval has elapsed since the proxy was
+        blocked, exactly one request is let through as a probe; others are
+        refused until it completes. A successful response unblocks the proxy,
+        while each failed probe doubles the wait up to ``max_interval``.
+        ``max_interval=None`` means no backoff. An interval of 0 (the default)
+        disables retry, leaving the proxy blocked until
         reset_proxy_failures() is called.
         """
         if interval < 0:

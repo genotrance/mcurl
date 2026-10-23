@@ -220,7 +220,6 @@ MCurl(debug_print=None)
 ```
 
 Pass a callable as `debug_print` to enable debug output (e.g. `MCurl(debug_print=print)`).
-`auth_retry` and `auth_retry_max` are passed to `set_auth_retry()`.
 
 ### Proxy auth failures
 
@@ -248,7 +247,7 @@ completes frees the slot for the next caller.
 |--------|-------------|
 | `setopt(option, value)` | Configure a multi option (socket/timer callbacks are reserved by mcurl) |
 | `set_failure_threshold(threshold)` | Set number of auth failures before blocking a proxy (default: 3) |
-| `set_auth_retry(interval, max_interval=None)` | Retry a blocked proxy after `interval` seconds with a single probe request; failed probes double the interval up to `max_interval` (default: 0, never retry) |
+| `set_auth_retry(seconds[, max_seconds])` | Retry a blocked proxy after `seconds` with a single probe request; seconds may be integers or floats, including fractions. Failed probes double the wait up to `max_seconds`; omitting the cap means no backoff. The default is 0 seconds, which never retries. |
 | `reset_proxy_failures(proxy=None)` | Clear auth failure state for one proxy, or all proxies if `None` |
 | `add(curl)` | Add a `Curl` handle to the multi instance for concurrent execution |
 | `do(curl)` | Add a `Curl` handle and perform until completion; returns `True` on success |
@@ -278,7 +277,7 @@ with mcurl.MCurl() as m:
 | `failed` | dict | `{proxy: failure_count}` for auth failures |
 | `failure_threshold` | int | Max auth failures before blocking (default: 3) |
 | `auth_retry` | float | Seconds before a blocked proxy gets a probe request (default: 0, never) |
-| `auth_retry_max` | float | Cap for the doubled retry interval after failed probes |
+| `auth_retry_max` | float | Optional cap in seconds for the doubled retry interval after failed probes |
 
 ---
 
