@@ -38,6 +38,13 @@ validated before it is promoted to `devel`.
   `pyproject.toml`; it verifies the resulting version because an unrelated
   Homebrew dependency-link warning can otherwise make a successful curl
   upgrade exit nonzero.
+- The macOS arm64 release wheel requires macOS 15 or later. Since 8.23.0.1 the
+  wheel is built on `macos-15` and bundles Homebrew's curl dependency closure;
+  current Homebrew bottles for curl and most of its dependencies target macOS
+  15, and rebuilding that closure from source for macOS 14 was rejected as too
+  costly. This also avoids depending on the macOS 14 GitHub-hosted runner,
+  which is scheduled for retirement on 2026-11-02. On macOS 14, pip falls back
+  to the sdist, which requires Homebrew curl matching the libcurl version.
 - **Excludes:** macOS × PyPy — installing cffi 2.x from PyPI overwrites PyPy's
   built-in `_cffi_backend`, causing `CURLE_URL_MALFORMED` failures at runtime.
   PyPy on Linux works correctly because the built-in cffi is preserved.

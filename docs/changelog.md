@@ -2,6 +2,13 @@
 
 ---
 
+## v8.23.0.2 — TBD
+
+- macOS arm64 wheels now require macOS 15 or later (changed in 8.23.0.1).
+  macOS 14 users receive the source distribution instead.
+
+---
+
 ## v8.23.0.1 — TBD
 
 - Updated to libcurl v8.23.0.

@@ -39,7 +39,7 @@ The `ffibuilder` entry point in `mcurl/gen.py` drives the entire build:
 |----------|---------------|----------|-------|
 | Linux (glibc) | jbb / LibCURL_jll.jl | gcc | auditwheel bundles `.so` files |
 | Linux (musl) | jbb / LibCURL_jll.jl | gcc | musllinux wheels |
-| macOS | Homebrew (`brew install curl`) | clang | delocate bundles dylibs |
+| macOS | Homebrew (`brew install curl`) | clang | delocate bundles dylibs; arm64 wheels require macOS 15+ |
 | Windows | jbb / LibCURL_jll.jl | mingw32 | delvewheel bundles DLLs |
 
 ---
@@ -125,6 +125,13 @@ cache starts empty.
 For CPython, a single `cp39-abi3` wheel is produced per platform/arch,
 compatible with any CPython ≥ 3.9. For PyPy, a separate wheel is produced per
 PyPy version (Linux only).
+
+The macOS arm64 wheel requires macOS 15 or later. Since 8.23.0.1 it has been
+built on the `macos-15` runner and bundles Homebrew's curl dependency closure.
+Homebrew's current curl and dependency bottles target macOS 15; current
+macOS 14 bottles are not available, and rebuilding the closure from source for
+macOS 14 was rejected as too costly. On macOS 14, pip therefore falls back to
+the sdist, which requires Homebrew curl matching the libcurl version.
 
 | Platform | Arch | CPython wheels | PyPy wheels | Notes |
 |----------|------|:--------------:|:-----------:|-------|
