@@ -205,7 +205,7 @@ def test_failed_probe_reblocks(proxy, multi):
 
 
 def test_failed_probe_backoff(proxy, multi):
-    multi.set_auth_retry(0.3, max_interval=1.2)
+    multi.set_auth_retry(0.3, max_seconds=1.2)
     _block(multi, proxy)
 
     time.sleep(0.4)
@@ -217,7 +217,7 @@ def test_failed_probe_backoff(proxy, multi):
     assert _request(multi, proxy) == 401
     # Doubled to 1.2s, the cap
     assert multi._blocked[proxy.url][1] == pytest.approx(1.2)
-    multi.set_auth_retry(0.01, max_interval=0.02)
+    multi.set_auth_retry(0.01, max_seconds=0.02)
     multi._blocked[proxy.url] = (0, 0.02)
     assert _request(multi, proxy) == 401
     assert multi._blocked[proxy.url][1] == pytest.approx(0.02)
@@ -409,13 +409,13 @@ def test_reset_clears_in_flight_probe(proxy, multi):
 
 def test_auth_retry_options():
     m = mcurl.MCurl()
-    assert (m.auth_retry, m.auth_retry_max) == (0, 0)
-    m.set_auth_retry(5, max_interval=60)
+    assert (m.auth_retry, m.auth_retry_max) == (0, None)
+    m.set_auth_retry(5, max_seconds=60)
     assert (m.auth_retry, m.auth_retry_max) == (5, 60)
     m.set_auth_retry(2)
-    assert (m.auth_retry, m.auth_retry_max) == (2, 2)
+    assert (m.auth_retry, m.auth_retry_max) == (2, None)
     with pytest.raises(ValueError):
         m.set_auth_retry(-1)
     with pytest.raises(ValueError):
-        m.set_auth_retry(10, max_interval=5)
+        m.set_auth_retry(10, max_seconds=5)
     m.close()

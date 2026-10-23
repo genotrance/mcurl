@@ -1311,7 +1311,7 @@ class MCurl:
         self.failed = {}
         self.failure_threshold = 3
         self.auth_retry = 0
-        self.auth_retry_max = 0
+        self.auth_retry_max = None
         self.rlist = set()
         self.wlist = set()
         self._lock = threading.Lock()
@@ -1334,27 +1334,25 @@ class MCurl:
             raise ValueError("Threshold must be at least 1")
         self.failure_threshold = threshold
 
-    def set_auth_retry(self, interval, max_interval=None):
+    def set_auth_retry(self, seconds, max_seconds=None):
         """Configure proxy auth retry intervals in seconds.
 
-        ``interval`` and ``max_interval`` accept integers or floats, including
+        ``seconds`` and ``max_seconds`` accept integers or floats, including
         fractional seconds. Once the interval has elapsed since the proxy was
         blocked, exactly one request is let through as a probe; others are
         refused until it completes. A successful response unblocks the proxy,
-        while each failed probe doubles the wait up to ``max_interval``.
-        ``max_interval=None`` means no backoff. An interval of 0 (the default)
+        while each failed probe doubles the wait up to ``max_seconds``.
+        ``max_seconds=None`` means no backoff. An interval of 0 (the default)
         disables retry, leaving the proxy blocked until
         reset_proxy_failures() is called.
         """
-        if interval < 0:
+        if seconds < 0:
             raise ValueError("Auth retry interval cannot be negative")
-        if max_interval is None:
-            max_interval = interval
-        elif max_interval < interval:
+        if max_seconds is not None and max_seconds < seconds:
             raise ValueError("Auth retry max interval cannot be less than interval")
         with self._auth_lock:
-            self.auth_retry = interval
-            self.auth_retry_max = max_interval
+            self.auth_retry = seconds
+            self.auth_retry_max = max_seconds
 
     def reset_proxy_failures(self, proxy=None):
         "Clear auth failure state for proxy, or for all proxies if None"
@@ -1417,7 +1415,7 @@ class MCurl:
                 self.failed[proxy] = self.failed.get(proxy, 0) + 1
                 if self.failed[proxy] < self.failure_threshold:
                     return
-                if probe:
+                if probe and self.auth_retry_max is not None:
                     # Back off after each failed probe
                     interval = min(max(interval, self.auth_retry) * 2, self.auth_retry_max)
             elif not probe:
