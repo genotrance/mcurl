@@ -47,6 +47,8 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.14"
           - os: ubuntu-latest
+            python-version: "3.15"
+          - os: ubuntu-latest
             python-version: "pypy3.11"
           # Linux aarch64 - native ARM runners
           - os: ubuntu-24.04-arm
@@ -55,6 +57,8 @@ jobs:
             python-version: "3.13"
           - os: ubuntu-24.04-arm
             python-version: "3.14"
+          - os: ubuntu-24.04-arm
+            python-version: "3.15"
           - os: ubuntu-24.04-arm
             python-version: "pypy3.11"
           # macOS arm64
@@ -70,6 +74,8 @@ jobs:
             python-version: "3.13"
           - os: macos-15
             python-version: "3.14"
+          - os: macos-15
+            python-version: "3.15"
     defaults:
       run:
         shell: bash
@@ -122,6 +128,8 @@ jobs:
             cibw_build: "cp313-win_amd64"
           - python-version: "3.14"
             cibw_build: "cp314-win_amd64"
+          - python-version: "3.15"
+            cibw_build: "cp315-win_amd64"
     name: test windows ${{ matrix.python-version }}
     steps:
       - name: Check out
@@ -131,7 +139,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v4.2.1
+        uses: pypa/cibuildwheel@v4.3.4
         env:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: ${{ matrix.cibw_build }}
@@ -151,6 +159,8 @@ jobs:
             cibw_build: "cp39-manylinux_i686"
           - python-version: "3.14"
             cibw_build: "cp314-manylinux_i686"
+          - python-version: "3.15"
+            cibw_build: "cp315-manylinux_i686"
     name: test linux i686 ${{ matrix.python-version }}
     steps:
       - name: Check out
@@ -160,7 +170,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Linux i686)
-        uses: pypa/cibuildwheel@v4.2.1
+        uses: pypa/cibuildwheel@v4.3.4
         env:
           CIBW_ARCHS: i686
           CIBW_BUILD: ${{ matrix.cibw_build }}
