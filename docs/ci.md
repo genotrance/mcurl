@@ -68,7 +68,7 @@ validated before it is promoted to `devel`.
 The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that current CPython releases and PyPy can
   be installed before GitHub runner images provide them directly.
-- Installs `uv`, syncs dependencies, and builds the extension.
+- Installs `uv`, syncs dependencies with `uv sync --locked` (fails if `uv.lock` is stale), and builds the extension.
 - For PyPy: skips installing `cffi` from PyPI (PyPy ships its own built-in cffi).
 - On Linux: a separate step reads the base libcurl version from
   `pyproject.toml`, then sets `LD_LIBRARY_PATH` to the matching
