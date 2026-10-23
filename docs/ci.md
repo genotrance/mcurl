@@ -49,6 +49,15 @@ validated before it is promoted to `devel`.
   release build, providing confidence that Windows wheels are correct without
   running the full build matrix on every CI push.
 
+**`tests-i686`** (matrix):
+- Builds and tests 32-bit Linux wheels (`manylinux` i686) via cibuildwheel,
+  for the oldest and newest CPython (3.9, 3.14).
+- Added because `main.yml` otherwise never runs 32-bit, yet `build.yml` ships
+  i686 wheels. The release build hit a 32-bit-only failure: the auth_retry
+  burst tests start 200 threads, which can exhaust the address space at the
+  default 8 MB stack size. Running this job on every push catches such
+  problems before a release.
+
 The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that Python 3.14 and PyPy can be installed.
 - Installs `uv`, syncs dependencies, and builds the extension.
