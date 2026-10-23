@@ -6,6 +6,12 @@
 
 - macOS arm64 wheels now require macOS 15 or later (changed in 8.23.0.1).
   macOS 14 users receive the source distribution instead.
+- Fixed a regression in v8.23.0.1 where `MCurl.do()` could stall for a full
+  second after its transfer had already finished (when another thread
+  completed it and libcurl had no sockets or timers pending). Concurrent
+  HTTPS requests through authenticating proxies were delayed long enough for
+  TLS servers with short handshake timeouts to drop the tunnel, causing curl
+  errors 35/55.
 
 ---
 
