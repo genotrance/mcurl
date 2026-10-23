@@ -4,7 +4,7 @@ export TMP ?= /tmp
 # for local test runs. Run: eval $(make env) to set it in your shell.
 .PHONY: install
 install: ## Install the virtual environment, build extension, and install pre-commit hooks
-	@TMP=$(TMP) uv sync
+	@TMP=$(TMP) uv sync --locked
 	@TMP=$(TMP) uv pip install -e .
 	@uv run python -m pre_commit install
 

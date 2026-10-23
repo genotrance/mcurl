@@ -100,8 +100,8 @@ jobs:
       - name: Set LD_LIBRARY_PATH for jbb libcurl (Linux)
         if: runner.os == 'Linux'
         run: |
-          LIBCURL_VERSION=$(uv run python -c 'version = next(line.split("=", 1)[1].strip().strip("\"") for line in open("pyproject.toml") if line.startswith("version")); print(version.rsplit(".", 1)[0])')
-          LIB_DIRS=$(uv run python -m jbb -d "$RUNNER_TEMP/mcurl/$(uv run python -c 'import jbb; print(jbb.get_key())')" -q -p genotrance "LibCURL-v$LIBCURL_VERSION")
+          LIBCURL_VERSION=$(uv run --locked python -c 'version = next(line.split("=", 1)[1].strip().strip("\"") for line in open("pyproject.toml") if line.startswith("version")); print(version.rsplit(".", 1)[0])')
+          LIB_DIRS=$(uv run --locked python -m jbb -d "$RUNNER_TEMP/mcurl/$(uv run --locked python -c 'import jbb; print(jbb.get_key())')" -q -p genotrance "LibCURL-v$LIBCURL_VERSION")
           echo "LD_LIBRARY_PATH=${LIB_DIRS}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Set DYLD_LIBRARY_PATH for brew libcurl (macOS)
@@ -112,7 +112,7 @@ jobs:
           echo "DYLD_LIBRARY_PATH=${DIRS}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Run tests
-        run: uv run python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
+        run: uv run --locked python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
 
   tests-windows:
     runs-on: windows-latest

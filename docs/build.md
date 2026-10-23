@@ -159,3 +159,12 @@ from `pyproject.toml` at the tagged commit. `build.yml` also supports a
 performed without publishing or tagging. See the
 [release checklist](ci.md#release-checklist) in `docs/ci.md` for the
 pre-merge operator gate and the release workflow.
+
+### Dependency lock
+
+`uv.lock` is tracked in git so source checkouts and CI install reviewed
+dependency versions. CI, `make install` and `uv run` steps use `--locked`, so a
+stale lock fails loudly. Dependabot (`.github/dependabot.yml`, `uv` ecosystem)
+opens grouped minor/patch upgrade PRs. To upgrade manually, run
+`uv lock --upgrade` (or `uv lock --upgrade-package <name>`), run the tests,
+and commit `uv.lock`. The `jbb>=0.1.6` requirement is unchanged everywhere.
