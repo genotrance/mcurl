@@ -39,7 +39,7 @@ The `ffibuilder` entry point in `mcurl/gen.py` drives the entire build:
 |----------|---------------|----------|-------|
 | Linux (glibc) | jbb / LibCURL_jll.jl | gcc | auditwheel bundles `.so` files |
 | Linux (musl) | jbb / LibCURL_jll.jl | gcc | musllinux wheels |
-| macOS | Homebrew (`brew install curl`) | clang | delocate bundles dylibs |
+| macOS | Homebrew (`brew install curl`) | clang | delocate bundles dylibs; arm64 wheels require macOS 15+ |
 | Windows | jbb / LibCURL_jll.jl | mingw32 | delvewheel bundles DLLs |
 
 ---
@@ -98,8 +98,8 @@ builds are enabled for Linux only.
 Several configurations are skipped because they are unsupported or broken:
 
 - **i686 musl** — no demand for 32-bit Alpine wheels.
-- **Free-threaded CPython (3.14t)** — deferred because `brotlicffi` (a
-  transitive test dependency) has not published a compatible release.
+- **Free-threaded CPython 3.14** — the release matrix ships free-threaded
+  CPython 3.15 wheels, matching the 8.23.0.1 wheel set.
 - **macOS PyPy** — cffi 2.x from PyPI overwrites PyPy’s built-in
   `_cffi_backend`, causing silent ABI mismatches that produce
   `CURLE_URL_MALFORMED` on every request. Linux PyPy is unaffected.
@@ -122,19 +122,27 @@ cache starts empty.
 
 ## Wheel matrix
 
-For CPython, a single `cp39-abi3` wheel is produced per platform/arch,
-compatible with any CPython ≥ 3.9. For PyPy, a separate wheel is produced per
-PyPy version (Linux only).
+For CPython, a `cp39-abi3` wheel is produced per platform/arch, compatible
+with any non-free-threaded CPython ≥ 3.9. A separate `cp315-cp315t` wheel is
+produced for free-threaded CPython 3.15 because it cannot use the stable ABI.
+For PyPy, a separate wheel is produced per PyPy version (Linux only).
+
+The macOS arm64 wheel requires macOS 15 or later. Since 8.23.0.1 it has been
+built on the `macos-15` runner and bundles Homebrew's curl dependency closure.
+Homebrew's current curl and dependency bottles target macOS 15; current
+macOS 14 bottles are not available, and rebuilding the closure from source for
+macOS 14 was rejected as too costly. On macOS 14, pip therefore falls back to
+the sdist, which requires Homebrew curl matching the libcurl version.
 
 | Platform | Arch | CPython wheels | PyPy wheels | Notes |
 |----------|------|:--------------:|:-----------:|-------|
-| Linux (glibc) | x86_64 | 1 (abi3) | 2 (pypy310, pypy311) | |
-| Linux (glibc) | i686 | 1 (abi3) | 2 | |
-| Linux (glibc) | aarch64 | 1 (abi3) | 2 | native ARM runner |
-| Linux (musl) | x86_64 | 1 (abi3) | — | no PyPy musl support |
-| Linux (musl) | aarch64 | 1 (abi3) | — | native ARM runner, no PyPy musl support |
-| Windows | AMD64 | 1 (abi3) | — | mingw32 incompatible with PyPy |
-| macOS | arm64 | 1 (abi3) | — | cffi 2.x ABI conflict on PyPy |
+| Linux (glibc) | x86_64 | 2 (abi3, cp315t) | 2 (pypy310, pypy311) | |
+| Linux (glibc) | i686 | 2 (abi3, cp315t) | 2 | |
+| Linux (glibc) | aarch64 | 2 (abi3, cp315t) | 2 | native ARM runner |
+| Linux (musl) | x86_64 | 2 (abi3, cp315t) | — | no PyPy musl support |
+| Linux (musl) | aarch64 | 2 (abi3, cp315t) | — | native ARM runner, no PyPy musl support |
+| Windows | AMD64 | 2 (abi3, cp315t) | — | mingw32 incompatible with PyPy |
+| macOS | arm64 | 2 (abi3, cp315t) | — | cffi 2.x ABI conflict on PyPy |
 
 ---
 
@@ -143,3 +151,21 @@ PyPy version (Linux only).
 Versions follow `<libcurl_major>.<libcurl_minor>.<libcurl_patch>.<release>`,
 e.g. `8.19.0.1`. The first three components track the upstream libcurl version;
 the fourth is incremented for mcurl-specific releases against the same libcurl.
+
+The committed `pyproject.toml` version is the release version: when libcurl
+moves, `check-upstream.yml` commits the bump to `main` before building, and the
+`build.yml` publish job refuses to publish or tag if the built version differs
+from `pyproject.toml` at the tagged commit. `build.yml` also supports a
+`dry_run` dispatch input so the complete wheel build and artifact checks can be
+performed without publishing or tagging. See the
+[release checklist](ci.md#release-checklist) in `docs/ci.md` for the
+pre-merge operator gate and the release workflow.
+
+### Dependency lock
+
+`uv.lock` is tracked in git so source checkouts and CI install reviewed
+dependency versions. CI, `make install` and `uv run` steps use `--locked`, so a
+stale lock fails loudly. Dependabot (`.github/dependabot.yml`, `uv` ecosystem)
+opens grouped minor/patch upgrade PRs. To upgrade manually, run
+`uv lock --upgrade` (or `uv lock --upgrade-package <name>`), run the tests,
+and commit `uv.lock`. The `jbb>=0.1.6` requirement is unchanged everywhere.

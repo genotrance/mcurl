@@ -2,8 +2,29 @@
 
 ---
 
+## v8.23.0.2 — TBD
+
+- macOS arm64 wheels now require macOS 15 or later (changed in 8.23.0.1).
+  macOS 14 users receive the source distribution instead.
+- Fixed a regression in v8.23.0.1 where `MCurl.do()` could stall for a full
+  second after its transfer had already finished (when another thread
+  completed it and libcurl had no sockets or timers pending). Concurrent
+  HTTPS requests through authenticating proxies were delayed long enough for
+  TLS servers with short handshake timeouts to drop the tunnel, causing curl
+  errors 35/55.
+- Added CPython 3.15 support on every supported wheel platform.
+- `MCurl.do()` waits at most 1 second only while it is waiting on sockets;
+  it no longer applies that cap when libcurl reports nothing to wait for.
+- `auth_retry` treats stopped or callback-aborted probes, zero response
+  codes, and non-407 CONNECT failures as inconclusive instead of counting
+  them as authentication failures.
+
+---
+
 ## v8.23.0.1 — TBD
 
+- This release was yanked from PyPI: its HTTPS proxy authentication handling
+  regressed under concurrent load (see v8.23.0.2). Use 8.23.0.2 or later.
 - Updated to libcurl v8.23.0.
 - Enabled TCP keepalive on all connections and a low-speed guard on non-CONNECT
   transfers, so a stalled HTTP response no longer occupies a worker

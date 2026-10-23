@@ -28,7 +28,7 @@ runs:
 
     - name: Install dependencies and build extension
       run: |
-        uv sync
+        uv sync --locked
         # PyPy ships its own cffi/_cffi_backend; installing cffi 2.x over it breaks things
         if python -c "import sys; sys.exit(0 if sys.implementation.name == 'pypy' else 1)"; then
           uv pip install setuptools 'jbb>=0.1.6'

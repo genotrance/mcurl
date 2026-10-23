@@ -1,5 +1,6 @@
 """Local-network regression tests for dead and slow connections."""
 
+import os
 import socket
 import socketserver
 import threading
@@ -8,6 +9,9 @@ import time
 import pytest
 
 import mcurl
+
+ROUNDS = int(os.environ.get("MULTI_ROUND_ROUNDS", "30"))
+WIDTH = int(os.environ.get("MULTI_ROUND_WIDTH", "4"))
 
 
 class _Server(socketserver.ThreadingTCPServer):
@@ -176,3 +180,100 @@ def test_multi_no_timer_wait_is_bounded(monkeypatch):
     multi._perform()
     assert seen == [mcurl.MULTI_SELECT_TIMEOUT]
     multi.close()
+
+
+def test_multi_no_timer_no_sockets_does_not_sleep(monkeypatch):
+    # Nothing can interrupt a sleep, so capping it would stall do() callers
+    multi = mcurl.MCurl()
+    multi.timer = None
+    multi.rlist = set()
+    multi.wlist = set()
+    slept = []
+    monkeypatch.setattr(mcurl.time, "sleep", slept.append)
+    multi._perform()
+    assert slept == []
+    multi.timer = 0.25
+    multi._perform()
+    assert slept == [0.25]
+    multi.close()
+
+
+def test_multi_perform_skips_wait_for_finished_handle(monkeypatch):
+    # A handle finished by another thread must not wait on unrelated sockets
+    multi = mcurl.MCurl()
+    multi.timer = None
+    multi.rlist = {10}
+    curl = mcurl.Curl("http://127.0.0.1/")
+    curl.done = True
+    monkeypatch.setattr(mcurl.select, "select", lambda *args: pytest.fail("select called"))
+    multi._perform(curl)
+    multi.close()
+
+
+class _MultiRoundAuthProxy(socketserver.BaseRequestHandler):
+    # Answers CONNECT with 407 on a kept-alive connection until the client
+    # retries with credentials, like a multi-round Digest/NTLM handshake
+    def handle(self):
+        buf = b""
+        while True:
+            while b"\r\n\r\n" not in buf:
+                data = self.request.recv(4096)
+                if not data:
+                    return
+                buf += data
+            head, buf = buf.split(b"\r\n\r\n", 1)
+            if b"\nproxy-authorization:" not in head.lower():
+                self.request.sendall(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                    b'Proxy-Authenticate: Basic realm="fake"\r\nContent-Length: 0\r\n\r\n'
+                )
+                continue
+            self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            data = self.request.recv(4)
+            self.request.sendall(data)
+            return
+
+
+def test_concurrent_multi_round_connect_auth_is_not_stalled(local_server, monkeypatch):
+    # pymcurl 8.23.0.1 slept a full MULTI_SELECT_TIMEOUT whenever a do() loop
+    # saw no sockets and no libcurl timer; concurrent tunnels then stalled
+    # long enough for TLS servers with short handshake timeouts to give up
+    address = local_server(_MultiRoundAuthProxy)
+    real_sleep = time.sleep
+    long_sleeps = []
+
+    def sleep(seconds):
+        if seconds >= mcurl.MULTI_SELECT_TIMEOUT:
+            long_sleeps.append(seconds)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(mcurl.time, "sleep", sleep)
+    multi = mcurl.MCurl()
+    errors = []
+
+    def tunnel():
+        curl = mcurl.Curl("example.test:443", method="CONNECT")
+        curl.set_proxy(address[0], address[1])
+        curl.set_auth("user", "password", "BASIC")
+        if not multi.do(curl):
+            errors.append(curl.errstr)
+            return
+        # Like px, keep the finished handle in the multi while the tunnel runs
+        sock = socket.socket(fileno=socket.dup(curl.sock_fd))
+        sock.setblocking(True)
+        sock.sendall(b"ping")
+        if sock.recv(4) != b"ping":
+            errors.append("tunnel echo failed")
+        real_sleep(0.05)
+        sock.close()
+        multi.remove(curl)
+
+    for _ in range(ROUNDS):
+        threads = [threading.Thread(target=tunnel) for _ in range(WIDTH)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+    multi.close()
+    assert errors == []
+    assert long_sleeps == []

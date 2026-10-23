@@ -25,6 +25,10 @@ Binary [packages](https://pypi.org/project/pymcurl) are provided for the followi
 - x86_64-linux-musl
 - x86_64-windows
 
+The macOS arm64 wheel requires macOS 15 or later. On macOS 14, pip falls back
+to the source distribution; building it requires Homebrew curl matching the
+libcurl version used by pymcurl.
+
 mcurl leverages [cffi](https://pypi.org/project/cffi) to interface with libcurl
 and all binary dependencies are sourced from [binarybuilder.org](https://binarybuilder.org/).
 auditwheel on Linux, delocate on macOS and delvewheel on Windows are used to bundle
@@ -32,8 +36,9 @@ the shared libraries into the wheels.
 
 Thanks to [cffi](https://cffi.readthedocs.io/en/latest/cdef.html#ffibuilder-compile-etc-compiling-out-of-line-modules)
 and [Py_LIMITED_API](https://docs.python.org/3/c-api/stable.html#limited-c-api),
-the CPython wheel works on any CPython ≥ 3.9. Separate wheels are provided for
-PyPy.
+the `cp39-abi3` CPython wheel works on any non-free-threaded CPython ≥ 3.9.
+Separate `cp315-cp315t` wheels are provided for free-threaded CPython 3.15,
+and separate wheels are provided for PyPy.
 
 ## Usage
 
@@ -215,7 +220,7 @@ Bug reports and pull requests are welcome at <https://github.com/genotrance/mcur
 2. Run `make install` to set up the venv, build the C extension, and install pre-commit hooks.
 3. Create a feature branch, make changes, add tests in `tests/`.
 4. Run `make check && make test` — all checks must pass.
-5. Open a pull request. CI runs on Ubuntu, Windows, and macOS across Python 3.9–3.14 and PyPy 3.11.
+5. Open a pull request. CI runs on Ubuntu, Windows, and macOS across Python 3.9–3.15 and PyPy 3.11.
 
 ## Building
 

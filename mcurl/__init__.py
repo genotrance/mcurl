@@ -1505,24 +1505,28 @@ class MCurl:
 
     # Executing multi
 
-    def _perform(self):
+    def _perform(self, curl=None):
         # Perform all tasks in the multi instance
 
         # Snapshot socket lists and timer under lock
         with self._lock:
+            if curl is not None and curl.done:
+                # Another thread finished this handle since do() checked
+                return
             rsnap_set = set(self.rlist)
             wsnap_set = set(self.wlist)
             timer = self.timer
-            if timer is None:
-                timer = MULTI_SELECT_TIMEOUT
 
         rsnap = list(rsnap_set)
         wsnap = list(wsnap_set)
         # select()/sleep() outside the lock so other threads can add/remove
         rready, wready, xready = [], [], []
         if len(rsnap) != 0 or len(wsnap) != 0:
+            # Cap only waits on sockets, which activity can interrupt; with no
+            # sockets and no timer, sleeping would stall every caller of do()
+            wait = MULTI_SELECT_TIMEOUT if timer is None else timer
             try:
-                rready, wready, xready = select.select(rsnap, wsnap, list(rsnap_set | wsnap_set), timer)
+                rready, wready, xready = select.select(rsnap, wsnap, list(rsnap_set | wsnap_set), wait)
             except OSError:
                 # Socket closed between snapshot and select()
                 return
@@ -1553,7 +1557,7 @@ class MCurl:
             while True:
                 if curl.done:
                     break
-                self._perform()
+                self._perform(curl)
                 time.sleep(0.01)
             curl._save_auth()
         else:

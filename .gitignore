@@ -28,8 +28,6 @@ htmlcov/
 # pytest
 .pytest_cache/
 
-# uv
-uv.lock
 
 # Pre-commit
 .pre-commit-config.yaml.bak

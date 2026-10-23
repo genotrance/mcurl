@@ -5,6 +5,22 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to build and release (defaults to the dispatched branch head)"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Build and verify artifacts without uploading to PyPI or tagging"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # Keep actual main releases behind check-upstream.yml's version decision.
+  group: ${{ inputs.dry_run && format('build-dry-run-{0}', github.run_id) || github.ref == 'refs/heads/main' && 'release-main' || format('build-{0}', github.ref) }}
+  cancel-in-progress: false
 
 jobs:
   setup:
@@ -12,15 +28,21 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       publish: ${{ steps.resolve.outputs.publish }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 0
 
       - name: Resolve version
         id: resolve
         shell: bash
         run: |
+          if [ -n "${{ inputs.sha }}" ]; then
+            # Explicit commit: release exactly the version committed there.
+            VERSION=$(python3 -c "import re, pathlib; text = pathlib.Path('pyproject.toml').read_text(); m = re.search(r'version = \"(.+?)\"', text); print(m.group(1))")
+          else
           # Get latest LibCURL_jll.jl release and extract base version
           LATEST_RELEASE=$(curl -s "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
           BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
@@ -38,6 +60,7 @@ jobs:
               VERSION="${BASE_VERSION}.1"
             fi
           fi
+          fi
 
           PUBLISH="false"
           if [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
@@ -46,13 +69,16 @@ jobs:
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "publish=$PUBLISH" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION, Publish: $PUBLISH"
+          echo "dry_run=${{ inputs.dry_run || 'false' }}" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION, Publish: $PUBLISH, dry run: ${{ inputs.dry_run || 'false' }}"
 
   build-sdist:
     needs: setup
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Set version
         run: |
@@ -92,6 +118,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -111,7 +139,7 @@ jobs:
           test "$INSTALLED" = "$EXPECTED"
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v4.2.1
+        uses: pypa/cibuildwheel@v4.3.4
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
 
@@ -130,11 +158,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 0
 
       - name: Verify committed release version
         env:
-          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_SHA: ${{ inputs.sha || github.sha }}
           RELEASE_VERSION: ${{ needs.setup.outputs.version }}
         run: |
           COMMITTED_VERSION=$(git show "${RELEASE_SHA}:pyproject.toml" | python3 -c "import re, sys; m = re.search(r'^version = \"(.+?)\"', sys.stdin.read(), re.M); print(m.group(1))")
@@ -148,10 +177,42 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Verify artifacts and release state
+        id: state
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              pymcurl-"$VERSION"[.-]*) ;;
+              *) echo "::error::Artifact $f does not match version $VERSION"; exit 1 ;;
+            esac
+          done
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 "https://pypi.org/pypi/pymcurl/$VERSION/json")
+          case "$CODE" in
+            200) echo "on_pypi=true" >> "$GITHUB_OUTPUT"; echo "pymcurl $VERSION is already on PyPI, skipping upload." ;;
+            404) echo "on_pypi=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Unexpected PyPI response $CODE"; exit 1 ;;
+          esac
+
+      - name: Report dry-run publish plan
+        if: needs.setup.outputs.dry_run == 'true'
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+          ON_PYPI: ${{ steps.state.outputs.on_pypi }}
+        run: |
+          if [ "$ON_PYPI" = true ]; then
+            echo "::notice::Dry run: pymcurl $VERSION is already on PyPI; would only create a missing tag."
+          else
+            echo "::notice::Dry run: would upload pymcurl $VERSION and create its tag after the upload."
+          fi
+
       - name: Publish to PyPI
+        if: steps.state.outputs.on_pypi == 'false' && needs.setup.outputs.dry_run != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Create and push tag
+        if: needs.setup.outputs.dry_run != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -159,6 +220,6 @@ jobs:
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping."
           else
-            git tag "$TAG" "${{ github.sha }}"
+            git tag "$TAG" "$(git rev-parse HEAD)"
             git push origin "$TAG"
           fi
