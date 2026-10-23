@@ -12,7 +12,7 @@
   seconds (for example a silent long-poll or server-sent events stream) is now
   aborted; use `Curl.set_low_speed()` to change or disable this and
   `Curl.set_keepalive()` to tune keepalive.
-- Added `MCurl.set_auth_retry(seconds[, max_seconds])` so a proxy blocked after
+- Added `MCurl.set_auth_retry(seconds, max_seconds=None)` so a proxy blocked after
   repeated 407s is retried after a seconds-based interval with exactly one
   probe request, even under concurrent load, and unblocked if it succeeds.
   Fractional seconds are supported; an optional max-seconds cap enables

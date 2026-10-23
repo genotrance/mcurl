@@ -85,8 +85,8 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `setopt(option, value)` | Set any CURLOPT option; auto-converts Python str/int/bool to the correct cffi type |
-| `set_keepalive(idle=30, interval=10, count=3)` | Configure TCP keepalive probes; an idle value of 0 disables keepalive |
-| `set_low_speed(limit=1, seconds=120)` | Configure the low-speed stall guard; zero disables it |
+| `set_keepalive(idle=30, interval=10, count=3)` | Configure TCP keepalive probes: idle and interval are seconds and count is probes; defaults are 30 seconds, 10 seconds, and 3 probes; `idle=0` disables keepalive |
+| `set_low_speed(limit=1, seconds=120)` | Abort non-CONNECT transfers below `limit` bytes/second for `seconds`; defaults are 1 byte/second for 120 seconds; 0 for either value disables the guard |
 | `getinfo(info)` | Get any CURLINFO value; returns `(CURLcode, value)` with auto type inference |
 | `unsetopt(option)` | Reset a CURLOPT option to its libcurl default (best-effort) |
 
@@ -116,7 +116,9 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `perform()` | Execute the request using the easy interface (standalone, without multi) |
+| `close()` | Release an auth-retry probe reservation held by this handle before it is run or reset |
 | `get_response()` | Return `(CURLcode, response_code)` of completed request; uses CONNECTCODE for CONNECT method |
+| `get_connect_response()` | Return `(CURLcode, HTTP status)` from a proxy CONNECT request |
 | `get_response_code()` | Return the HTTP response code (convenience, no CURLcode) |
 | `get_effective_url()` | Return the final URL after redirects |
 | `get_content_type()` | Return the Content-Type header value, or None |
@@ -233,7 +235,10 @@ only one authentication attempt upstream. The probe's outcome in `do()`
 decides what happens next: a non-407 response unblocks the proxy, a 407 blocks
 it for another (possibly doubled) interval, and a libcurl error blocks it for
 the same interval. A probe handle that is reset or discarded before `do()`
-completes frees the slot for the next caller.
+completes frees the slot for the next caller. This state is locked within one
+`MCurl` instance and process-local, so independent workers can each send one
+probe per interval. Proxy CONNECT responses with status 407, including HTTPS
+proxy CONNECT failures, count as authentication failures.
 
 ### Static methods
 
@@ -246,8 +251,8 @@ completes frees the slot for the next caller.
 | Method | Description |
 |--------|-------------|
 | `setopt(option, value)` | Configure a multi option (socket/timer callbacks are reserved by mcurl) |
-| `set_failure_threshold(threshold)` | Set number of auth failures before blocking a proxy (default: 3) |
-| `set_auth_retry(seconds[, max_seconds])` | Retry a blocked proxy after `seconds` with a single probe request; seconds may be integers or floats, including fractions. Failed probes double the wait up to `max_seconds`; omitting the cap means no backoff. The default is 0 seconds, which never retries. |
+| `set_failure_threshold(threshold)` | Set the number of authentication failures before blocking a proxy (default: 3); 0 is invalid |
+| `set_auth_retry(seconds, max_seconds=None)` | Retry a blocked proxy after `seconds` with a single probe request; values are seconds and may be integers or floats, including fractions. Failed probes double the wait up to `max_seconds`; `None` keeps a fixed interval. The default is 0 seconds, which never retries; negative values are invalid. |
 | `reset_proxy_failures(proxy=None)` | Clear auth failure state for one proxy, or all proxies if `None` |
 | `add(curl)` | Add a `Curl` handle to the multi instance for concurrent execution |
 | `do(curl)` | Add a `Curl` handle and perform until completion; returns `True` on success |
@@ -277,7 +282,7 @@ with mcurl.MCurl() as m:
 | `failed` | dict | `{proxy: failure_count}` for auth failures |
 | `failure_threshold` | int | Max auth failures before blocking (default: 3) |
 | `auth_retry` | float | Seconds before a blocked proxy gets a probe request (default: 0, never) |
-| `auth_retry_max` | float | Optional cap in seconds for the doubled retry interval after failed probes |
+| `auth_retry_max` | float or None | Optional maximum seconds for the doubled retry interval after failed probes (default: None, fixed interval) |
 
 ---
 

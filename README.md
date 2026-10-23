@@ -94,6 +94,28 @@ else:
 m.close()
 ```
 
+### Connection and proxy controls
+
+`Curl` enables TCP keepalive by default: `set_keepalive(idle=30,
+interval=10, count=3)` configures the idle and probe intervals in seconds and
+the number of probes; `idle=0` disables it. Non-CONNECT transfers also have a
+low-speed guard: `set_low_speed(limit=1, seconds=120)` aborts a transfer below
+1 byte/second for 120 seconds. Setting either low-speed value to 0 disables
+that guard.
+
+`MCurl` blocks a proxy after `failure_threshold` consecutive authenticated 407
+responses (default 3; configure it with `set_failure_threshold()`, where 0 is
+invalid). `set_auth_retry(seconds, max_seconds=None)` enables one probe after
+the specified seconds; the default `auth_retry` is 0, so retries are disabled.
+`auth_retry_max` defaults to `None` for a fixed interval, or caps exponential
+backoff when set. `reset_proxy_failures(proxy=None)` clears one proxy's state
+or every proxy's state.
+
+The probe admission is locked per `MCurl` instance, so concurrent callers in
+one process send exactly one probe per interval. State is process-local:
+separate workers can each send a probe. A 407 from a proxy CONNECT request,
+including an HTTPS proxy CONNECT failure, counts toward the threshold.
+
 ### Raw libcurl API
 
 The [libcurl C API](https://curl.se/libcurl/c/) can also be accessed directly:
