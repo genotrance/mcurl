@@ -1,5 +1,6 @@
 """Auth retry for proxies blocked after repeated 407s, against a local fake proxy."""
 
+import contextlib
 import gc
 import http.server
 import threading
@@ -27,6 +28,11 @@ class _FakeProxy(http.server.ThreadingHTTPServer):
     @property
     def url(self):
         return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def process_request(self, request, client_address):
+        # Handler threads are started by the server thread, so they need the small stacks too
+        with _small_stacks():
+            super().process_request(request, client_address)
 
 
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -288,6 +294,21 @@ def test_connect_407_latches_probes_and_recovers(proxy, multi):
     assert proxy.url not in multi._blocked
 
 
+BURST_STACK_SIZE = 256 * 1024  # 200 default 8 MB stacks can exhaust a 32-bit address space
+_stack_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _small_stacks():
+    # Threads started inside the block get BURST_STACK_SIZE stacks; the previous size is restored
+    with _stack_lock:
+        previous = threading.stack_size(BURST_STACK_SIZE)
+        try:
+            yield
+        finally:
+            threading.stack_size(previous)
+
+
 def _concurrent(func, count):
     # Call func from count threads released together; returns their results
     barrier = threading.Barrier(count)
@@ -300,9 +321,10 @@ def _concurrent(func, count):
         with lock:
             results.append(result)
 
-    threads = [threading.Thread(target=worker) for _ in range(count)]
-    for thread in threads:
-        thread.start()
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(count)]
+    with _small_stacks():
+        for thread in threads:
+            thread.start()
     for thread in threads:
         thread.join(30)
     assert len(results) == count
