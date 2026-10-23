@@ -266,9 +266,10 @@ artifacts but logs instead of uploading or tagging.
 
 ## Dependabot
 
-Dependabot is configured to check for GitHub Actions version updates on a
-monthly schedule. This keeps action pinned versions (e.g. `actions/checkout`)
-current without manual tracking.
+Dependabot (`.github/dependabot.yml`) checks GitHub Actions versions and the
+tracked `uv.lock` (`uv` ecosystem) monthly, grouping minor and patch lock
+updates. This keeps pinned action versions (e.g. `actions/checkout`) and
+locked dependencies current without manual tracking.
 
 ---
 
