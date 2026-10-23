@@ -61,7 +61,8 @@ def _burst(multi, url, count, easy=False, timeout=None):
 
 def _latched(url=None, proxy=None, interval=INTERVAL, max_interval=None):
     # A fresh MCurl whose proxy was latched by failure_threshold sequential 407s
-    multi = mcurl.MCurl(auth_retry=interval, auth_retry_max=max_interval)
+    multi = mcurl.MCurl()
+    multi.set_auth_retry(interval, max_interval=max_interval)
     url = url or proxy.url
     if proxy is not None:
         proxy.mode = "deny"
