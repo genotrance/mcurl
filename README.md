@@ -25,6 +25,10 @@ Binary [packages](https://pypi.org/project/pymcurl) are provided for the followi
 - x86_64-linux-musl
 - x86_64-windows
 
+The macOS arm64 wheel requires macOS 15 or later. On macOS 14, pip falls back
+to the source distribution; building it requires Homebrew curl matching the
+libcurl version used by pymcurl.
+
 mcurl leverages [cffi](https://pypi.org/project/cffi) to interface with libcurl
 and all binary dependencies are sourced from [binarybuilder.org](https://binarybuilder.org/).
 auditwheel on Linux, delocate on macOS and delvewheel on Windows are used to bundle
