@@ -144,6 +144,45 @@ build matrix.
 
 ---
 
+## Release checklist
+
+Run this checklist before merging a release from `devel` into `main`. It
+combines the checks that protect the release build with an integration check
+against px, which consumes pymcurl in production.
+
+1. Confirm that CI is green on `devel`, including the 32-bit Linux job. The
+   release build includes an i686 wheel, so the regular test matrix alone does
+   not cover every shipped configuration.
+2. Build the release candidate locally with the Makefile, using the libcurl
+   base version declared in `pyproject.toml`, and run mcurl's full test suite
+   against that candidate.
+3. Install the candidate into px's current working branch and run px's full
+   suite at least twice with `PX_EVENT_LOOP` unset and at least twice with it
+   set to `asyncio`. Run these tests from a directory outside the developer's
+   home directory: a `~/.env` containing `PX_` variables can alter px's
+   authentication-chain tests. Repeat the same runs with the previous pymcurl
+   release for comparison. Any failure that is new with the candidate blocks
+   the release. This check would have caught the HTTPS proxy-auth regression
+   shipped in 8.23.0.1, which was released after step 3 was skipped.
+4. Compare the wheel platform tags produced by the candidate with the
+   previous release's files on PyPI. A runner change moved the macOS wheel
+   from `macosx_14_0` to `macosx_15_0` in 8.23.0.1; tag changes must be
+   understood before release.
+5. Confirm that Homebrew's curl matches the libcurl base version in
+   `pyproject.toml`. The macOS wheel is built from Homebrew, so a mismatch
+   can produce a wheel for a different libcurl than the declared release.
+6. Merge `devel` into `main` with the commit message
+   `Merge devel for libcurl <version> release`. The push runs `build.yml`,
+   which builds and publishes the distributions and then creates the
+   matching tag. Afterward, verify the expected files are present on PyPI and
+   that the tag points to the intended release commit.
+
+The version, wheel, and publication details are described in the
+[build-system release notes](build.md#version-scheme); this checklist is the
+operator gate before the merge.
+
+---
+
 ## Check upstream (`check-upstream.yml`)
 
 - Runs weekly on Monday at 18:00 UTC (after the LibCURL_jll.jl weekly release
