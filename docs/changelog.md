@@ -13,11 +13,18 @@
   TLS servers with short handshake timeouts to drop the tunnel, causing curl
   errors 35/55.
 - Added CPython 3.15 support on every supported wheel platform.
+- `MCurl.do()` waits at most 1 second only while it is waiting on sockets;
+  it no longer applies that cap when libcurl reports nothing to wait for.
+- `auth_retry` treats stopped or callback-aborted probes, zero response
+  codes, and non-407 CONNECT failures as inconclusive instead of counting
+  them as authentication failures.
 
 ---
 
 ## v8.23.0.1 — TBD
 
+- This release was yanked from PyPI: its HTTPS proxy authentication handling
+  regressed under concurrent load (see v8.23.0.2). Use 8.23.0.2 or later.
 - Updated to libcurl v8.23.0.
 - Enabled TCP keepalive on all connections and a low-speed guard on non-CONNECT
   transfers, so a stalled HTTP response no longer occupies a worker

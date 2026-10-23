@@ -238,7 +238,9 @@ the same interval. A probe handle that is reset or discarded before `do()`
 completes frees the slot for the next caller. This state is locked within one
 `MCurl` instance and process-local, so independent workers can each send one
 probe per interval. Proxy CONNECT responses with status 407, including HTTPS
-proxy CONNECT failures, count as authentication failures.
+proxy CONNECT failures, count as authentication failures. Stopped or
+callback-aborted probes, zero response codes, and non-407 CONNECT failures
+are inconclusive and do not count.
 
 ### Static methods
 
