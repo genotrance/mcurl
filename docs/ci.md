@@ -84,11 +84,10 @@ The composite action `.github/actions/setup-python-env`:
   built-in `_cffi_backend`, producing silent ABI mismatches that cause libcurl
   to return `CURLE_URL_MALFORMED` (error 3) on every HTTP request. This does
   not affect Linux PyPy where the built-in cffi is preserved.
-- **Free-threaded CPython is not shipped yet.** Although current test
-  dependencies run on 3.15t, the configured cibuildwheel release does not
-  expose free-threaded wheel identifiers. The skip pattern keeps these
-  unsupported wheel builds out of the matrix until cibuildwheel support is
-  available.
+- **Free-threaded CPython 3.15 is shipped.** cibuildwheel builds and runs the
+  configured test command for each `cp315-cp315t` wheel. These wheels are
+  separate from the `cp39-abi3` wheels because the free-threaded ABI is not
+  covered by the stable ABI.
 - `jsonschema<4.18` is pinned to avoid pulling in `rpds-py` (Rust, no PyPy
   wheel) via the `httpbin → flasgger → jsonschema` chain.
 - **musllinux** is tested via cibuildwheel in `build.yml`, which builds
@@ -96,7 +95,7 @@ The composite action `.github/actions/setup-python-env`:
   containers. A separate musl job in `main.yml` is not needed because
   jbb's bundled OpenSSL conflicts with the newer system OpenSSL in musl
   containers, breaking Python's `ssl` module.
-- Windows CI tests multiple Python versions (3.9, 3.12, 3.13, 3.14) via
+- Windows CI tests multiple Python versions (3.9, 3.12, 3.13, 3.14, 3.15) via
   cibuildwheel and is fully built across all versions in `build.yml`. The CI
   job overrides `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS` to use `uv pip install`
   instead of `pip install` because pip is not available in cibuildwheel's
@@ -146,10 +145,11 @@ addition to `sha`. A dry build still exercises the complete wheel matrix and
 validates artifacts and PyPI state, but never uploads a distribution or
 creates a tag. Its own concurrency group means it cannot delay a real release.
 
-cibuildwheel skip patterns (`cp3*t-*`, `pp*-macosx_*`, `pp*-win_*`,
+cibuildwheel skip patterns (`cp314t-*`, `pp*-macosx_*`, `pp*-win_*`,
 `*-musllinux_i686`) ensure unsupported configurations are excluded from the
 build matrix. CI uses cibuildwheel 4.3.4 because it recognizes the CPython
-3.15 identifiers used by the release build and focused wheel tests.
+3.15 and free-threaded CPython 3.15 identifiers used by the release build and
+focused wheel tests.
 
 ---
 

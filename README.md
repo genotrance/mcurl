@@ -36,8 +36,9 @@ the shared libraries into the wheels.
 
 Thanks to [cffi](https://cffi.readthedocs.io/en/latest/cdef.html#ffibuilder-compile-etc-compiling-out-of-line-modules)
 and [Py_LIMITED_API](https://docs.python.org/3/c-api/stable.html#limited-c-api),
-the CPython wheel works on any CPython ≥ 3.9. Separate wheels are provided for
-PyPy.
+the `cp39-abi3` CPython wheel works on any non-free-threaded CPython ≥ 3.9.
+Separate `cp315-cp315t` wheels are provided for free-threaded CPython 3.15,
+and separate wheels are provided for PyPy.
 
 ## Usage
 
