@@ -1,10 +1,10 @@
 [build-system]
 build-backend = "setuptools.build_meta"
-requires = ["cffi", "jbb", "setuptools"]
+requires = ["cffi", "jbb>=0.1.6", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.22.0.1"
+version = "8.23.0.1"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -68,9 +68,10 @@ environment = { TMP="/tmp" }
 # Pin jsonschema to avoid rpds-py (Rust, no PyPy wheel) - only needed on Linux where PyPy is built
 test-requires = ["pytest", "pytest-httpbin", "jsonschema<4.18"]
 repair-wheel-command = [
-  "uv pip install jbb --system",
+  "uv pip install 'jbb>=0.1.6' --system",
   "export KEY=$(python -c 'import jbb; print(jbb.get_key())')",
-  "export LIB_DIRS=$(python -m jbb -d $TMP/mcurl/$KEY -q LibCURL)",
+  "export LIBCURL_VERSION=$(python -c 'version = next(line.split(\"=\", 1)[1].strip().strip(\"\\\"\") for line in open(\"pyproject.toml\") if line.startswith(\"version\")); print(version.rsplit(\".\", 1)[0])')",
+  "export LIB_DIRS=$(python -m jbb -d $TMP/mcurl/$KEY -q -p genotrance LibCURL-v$LIBCURL_VERSION)",
   "LD_LIBRARY_PATH=$LIB_DIRS auditwheel repair -w {dest_dir} {wheel}",
 ]
 
@@ -89,8 +90,8 @@ before-build = "rm -rf {project}/build {project}/_libcurl_cffi*"
 # Build with mingw32
 config-settings = "--build-option=build --build-option=--compiler --build-option=mingw32"
 repair-wheel-command = [
-  "uv pip install delvewheel jbb",
-  "python -c \"import os, subprocess, jbb; subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb('LibCURL', outdir=os.environ['TMP']+'\\\\mcurl\\\\'+jbb.get_key(), quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])\""
+  "uv pip install delvewheel \"jbb>=0.1.6\"",
+  "python -c \"import os, subprocess, jbb; version = next(line.split('=', 1)[1].strip().strip(chr(34)) for line in open('pyproject.toml') if line.startswith('version')); subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb(f'LibCURL-v{version.rsplit(chr(46), 1)[0]}', outdir=os.environ['TMP']+'\\\\mcurl\\\\'+jbb.get_key(), project='genotrance', quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])\""
 ]
 
 [tool.mypy]

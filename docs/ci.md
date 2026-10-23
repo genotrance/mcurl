@@ -8,7 +8,7 @@ Three workflows power the CI/CD pipeline:
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
-| CI | `main.yml` | push to `main`/`devel`, PRs | Code quality + test matrix |
+| CI | `main.yml` | push to `main`/`devel`/`working`, PRs | Code quality + test matrix |
 | Build wheels | `build.yml` | push to `main`/`devel`, manual dispatch | Build + publish to PyPI |
 | Check upstream | `check-upstream.yml` | monthly cron, manual | Detect new LibCURL_jll.jl releases |
 
@@ -17,7 +17,8 @@ Three workflows power the CI/CD pipeline:
 ## CI (`main.yml`)
 
 Runs code quality checks and the test suite across multiple Python versions and
-operating systems.
+operating systems. Pushes to `working` run the same checks so work can be
+validated before it is promoted to `devel`.
 
 ### Jobs
 
@@ -26,12 +27,12 @@ operating systems.
 - Runs `make check` (pre-commit hooks + mypy)
 
 **`tests`** (matrix):
-- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-14}`
+- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-15}`
 - Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.11}`
 - Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.11).
 - Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
-- macOS tests use `macos-14`, matching the macOS release-wheel runner and its
+- macOS tests use `macos-15`, matching the macOS release-wheel runner and its
   Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
   runner image's preinstalled version cannot lag behind the libcurl version in
   `pyproject.toml`; it verifies the resulting version because an unrelated
@@ -52,8 +53,10 @@ The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that Python 3.14 and PyPy can be installed.
 - Installs `uv`, syncs dependencies, and builds the extension.
 - For PyPy: skips installing `cffi` from PyPI (PyPy ships its own built-in cffi).
-- On Linux: a separate step sets `LD_LIBRARY_PATH` to point at the jbb-
-  downloaded libcurl so the extension can load at test time.
+- On Linux: a separate step reads the base libcurl version from
+  `pyproject.toml`, then sets `LD_LIBRARY_PATH` to the matching
+  `genotrance` jbb download so the extension can load at test time. This
+  avoids relying on a prior build having populated the same jbb cache.
 - On macOS: a separate step sets `DYLD_LIBRARY_PATH` to point at the Homebrew
   libcurl directories for test time. At build time, rpaths are embedded via
   `-Wl,-rpath` so installed wheels do not need `DYLD_LIBRARY_PATH` at runtime.
@@ -103,9 +106,11 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
    Linux aarch64 builds use native `ubuntu-24.04-arm` runners (no QEMU).
    macOS refreshes Homebrew curl before compilation so its wheel uses the
    release's declared libcurl version.
-4. **`publish`** — uploads to PyPI via
-   [trusted publisher](https://docs.pypi.org/trusted-publishers/) and creates
-   a git tag.
+4. **`publish`** — first verifies that the resolved release version matches
+   `pyproject.toml` at the triggering commit, then uploads to PyPI via
+   [trusted publisher](https://docs.pypi.org/trusted-publishers/) and tags that
+   same commit. This prevents an upstream-triggered release from publishing a
+   version whose tag would declare an older version in source control.
 
 Publishing only happens on pushes to `main`.
 
@@ -139,7 +144,7 @@ current without manual tracking.
 
 ## Deployment flow
 
-1. Push to `devel` → CI runs (quality + test matrix)
+1. Push to `devel` or `working` → CI runs (quality + test matrix)
 2. Optionally trigger `build.yml` manually on `devel` to verify wheel builds
 3. If CI green → merge `devel` → `main`
 4. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release

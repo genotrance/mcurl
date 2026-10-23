@@ -10,7 +10,7 @@ install: ## Install the virtual environment, build extension, and install pre-co
 
 .PHONY: env
 env: ## Print LD_LIBRARY_PATH export for local development
-	@uv run --with jbb python -c "import jbb; print('export LD_LIBRARY_PATH=' + ':'.join(jbb.jbb('LibCURL', outdir='$(TMP)/mcurl/'+jbb.get_key(), quiet=True)))"
+	@uv run --with 'jbb>=0.1.6' python -c "import jbb; version = next(line.split('=', 1)[1].strip().strip(chr(34)) for line in open('pyproject.toml') if line.startswith('version')); print('export LD_LIBRARY_PATH=' + ':'.join(jbb.jbb(f'LibCURL-v{version.rsplit(chr(46), 1)[0]}', outdir='$(TMP)/mcurl/'+jbb.get_key(), project='genotrance', quiet=True)))"
 
 .PHONY: check
 check: ## Run code quality tools

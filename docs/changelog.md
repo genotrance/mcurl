@@ -2,13 +2,33 @@
 
 ---
 
-## v8.22.0.1 — TBD
+## v8.23.0.1 — TBD
+
+- Updated to libcurl v8.23.0.
+- Enabled TCP keepalive on all connections and a low-speed guard on non-CONNECT
+  transfers, so a stalled HTTP response no longer occupies a worker
+  indefinitely while CONNECT tunnels and long transfers keep no overall
+  deadline. A plain-HTTP transfer that receives less than 1 byte/s for 120
+  seconds (for example a silent long-poll or server-sent events stream) is now
+  aborted; use `Curl.set_low_speed()` to change or disable this and
+  `Curl.set_keepalive()` to tune keepalive.
+- Added `MCurl.set_auth_retry(seconds, max_seconds=None)` so a proxy blocked after
+  repeated 407s is retried after a seconds-based interval with exactly one
+  probe request, even under concurrent load, and unblocked if it succeeds.
+  Fractional seconds are supported; an optional max-seconds cap enables
+  exponential backoff, while the default of 0 seconds disables retry.
+  It also recognizes 407 responses to HTTPS proxy CONNECT requests. Added
+  `MCurl.reset_proxy_failures()` to clear the block.
+
+---
+
+## v8.22.0.1 — 2026-10-04
 
 - Updated to libcurl v8.22.0.
 
 ---
 
-## v8.21.0.1 — TBD
+## v8.21.0.1 — 2026-07-21
 
 - Fixed `MCurl.select()` busy-loop at 100% CPU after a partial `send()` on a
   CONNECT tunnel.  A typo (`not data` instead of `not wdata`) prevented sockets

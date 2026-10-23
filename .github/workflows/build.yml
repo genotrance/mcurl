@@ -86,7 +86,7 @@ jobs:
           - os: windows-latest
             arch: x86_64
             cibw_archs: AMD64
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             cibw_archs: arm64
 
@@ -132,6 +132,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify committed release version
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          COMMITTED_VERSION=$(git show "${RELEASE_SHA}:pyproject.toml" | python3 -c "import re, sys; m = re.search(r'^version = \"(.+?)\"', sys.stdin.read(), re.M); print(m.group(1))")
+          if [ "$COMMITTED_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "Refusing to publish: pyproject.toml at $RELEASE_SHA declares $COMMITTED_VERSION, but the resolved release version is $RELEASE_VERSION."
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -148,6 +159,6 @@ jobs:
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping."
           else
-            git tag "$TAG"
+            git tag "$TAG" "${{ github.sha }}"
             git push origin "$TAG"
           fi

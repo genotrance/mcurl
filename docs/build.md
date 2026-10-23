@@ -25,7 +25,10 @@ The `ffibuilder` entry point in `mcurl/gen.py` drives the entire build:
    via [jbb](https://pypi.org/project/jbb/) (Linux/Windows) or uses Homebrew
    (macOS).
 2. Downloads Mozilla CA certificates via jbb.
-3. Preprocesses `curl.h` with gcc to extract the C API surface.
+3. Locates `curl/curl.h` from the directories jbb returns (the `include/`
+   sibling of each `lib/` or, on Windows, `bin/` directory), falling back to the
+   historical fixed extraction path, then preprocesses it with gcc to extract the
+   C API surface. This avoids depending on jbb's internal extraction layout.
 4. Generates cffi callback stubs for libcurl callbacks.
 5. Calls `cffi.FFI().set_source()` to produce the `_libcurl_cffi` extension
    module.
@@ -45,8 +48,10 @@ The `ffibuilder` entry point in `mcurl/gen.py` drives the entire build:
 
 ### Build backend
 
-The build backend is `setuptools.build_meta` with `cffi`, `jbb`, and
-`setuptools` as build-time requirements.
+The build backend is `setuptools.build_meta` with `cffi`, `jbb>=0.1.6`, and
+`setuptools` as build-time requirements. The minimum jbb version includes its
+version-ordered tag handling, so a requested libcurl release resolves
+consistently.
 
 ### Wheel tag
 
@@ -107,6 +112,11 @@ Several configurations are skipped because they are unsupported or broken:
 
 Platform-specific `repair-wheel-command` entries bundle shared libraries into
 wheels using auditwheel (Linux), delocate (macOS), and delvewheel (Windows).
+The Linux and Windows commands read the package version from `pyproject.toml`,
+remove the wrapper patch octet, and request that exact
+`LibCURL-v<base-version>` release from the `genotrance` project. This keeps
+the repaired wheel's library aligned with the extension even when its jbb
+cache starts empty.
 
 ---
 

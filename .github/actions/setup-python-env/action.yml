@@ -31,9 +31,9 @@ runs:
         uv sync
         # PyPy ships its own cffi/_cffi_backend; installing cffi 2.x over it breaks things
         if python -c "import sys; sys.exit(0 if sys.implementation.name == 'pypy' else 1)"; then
-          uv pip install setuptools jbb
+          uv pip install setuptools 'jbb>=0.1.6'
         else
-          uv pip install setuptools cffi jbb
+          uv pip install setuptools cffi 'jbb>=0.1.6'
         fi
         uv pip install -e .
       shell: bash
