@@ -143,3 +143,8 @@ PyPy version (Linux only).
 Versions follow `<libcurl_major>.<libcurl_minor>.<libcurl_patch>.<release>`,
 e.g. `8.19.0.1`. The first three components track the upstream libcurl version;
 the fourth is incremented for mcurl-specific releases against the same libcurl.
+
+The committed `pyproject.toml` version is the release version: when libcurl
+moves, `check-upstream.yml` commits the bump to `main` before building, and the
+`build.yml` publish job refuses to publish or tag if the built version differs
+from `pyproject.toml` at the tagged commit. See `docs/ci.md`.

@@ -10,7 +10,7 @@ Three workflows power the CI/CD pipeline:
 |----------|------|---------|---------|
 | CI | `main.yml` | push to `main`/`devel`/`working`, PRs | Code quality + test matrix |
 | Build wheels | `build.yml` | push to `main`/`devel`, manual dispatch | Build + publish to PyPI |
-| Check upstream | `check-upstream.yml` | monthly cron, manual | Detect new LibCURL_jll.jl releases |
+| Check upstream | `check-upstream.yml` | weekly cron (Mon 18:00 UTC), manual | Commit version bump and release new libcurl |
 
 ---
 
@@ -103,7 +103,12 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
 ### Triggers
 - **Push to `main`**: auto-build + publish
 - **`workflow_dispatch`**: manual trigger (can be used on any branch including
-  `devel` for ad-hoc builds without publishing)
+  `devel` for ad-hoc builds without publishing). An optional `sha` input
+  builds that exact commit and releases the version committed in its
+  `pyproject.toml` instead of deriving one; `check-upstream.yml` uses it so the
+  build cannot drift to a moving branch head.
+
+Release runs are serialized per ref through a `concurrency` group.
 
 ### Jobs
 
@@ -116,10 +121,14 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
    macOS refreshes Homebrew curl before compilation so its wheel uses the
    release's declared libcurl version.
 4. **`publish`** — first verifies that the resolved release version matches
-   `pyproject.toml` at the triggering commit, then uploads to PyPI via
-   [trusted publisher](https://docs.pypi.org/trusted-publishers/) and tags that
-   same commit. This prevents an upstream-triggered release from publishing a
-   version whose tag would declare an older version in source control.
+   `pyproject.toml` at the release commit (the `sha` input when given,
+   otherwise the triggering commit) and that every artifact carries that
+   version, so a tag can never point at a commit declaring a different
+   version. It then checks PyPI: if the version is already published the
+   upload is skipped (never uploading twice) and only the missing tag is
+   created; otherwise it uploads via
+   [trusted publisher](https://docs.pypi.org/trusted-publishers/) and tags
+   the release commit only after the upload succeeded.
 
 Publishing only happens on pushes to `main`.
 
@@ -131,15 +140,38 @@ build matrix.
 
 ## Check upstream (`check-upstream.yml`)
 
-- Runs monthly (1st of month, 06:00 UTC) and on manual dispatch.
+- Runs weekly on Monday at 18:00 UTC (after the LibCURL_jll.jl weekly release
+  at Monday 06:00 UTC, leaving Homebrew time to ship the same curl) and on
+  manual dispatch. It was monthly before; weekly releases follow libcurl
+  within a week without manual action.
 - Fetches the latest release tag from `genotrance/LibCURL_jll.jl` via the
   GitHub API.
 - Fails without dispatching a build if the API response does not contain a
   valid release tag, preventing a transient lookup failure from rebuilding an
   already-published version.
-- Compares the upstream libcurl version with the current version in
-  `pyproject.toml`.
-- If a newer version is found, triggers `build.yml` via `workflow_dispatch`.
+- Computes the target version (the `pyproject.toml` version on `main` if its
+  base already matches upstream, otherwise `<upstream>.1`) and decides whether
+  a release is needed by checking for the `v<target>` tag, i.e. what was
+  actually released, not `pyproject.toml`. A failed run (for example Homebrew
+  lagging, which fails the macOS version assertion) therefore leaves the tag
+  missing and the next weekly run retries.
+- If `pyproject.toml` needs bumping it updates it, adds a
+  "Updated to libcurl" entry to `docs/changelog.md`, commits and pushes to
+  `main` *before* anything is built. It then merges `main` into `devel` so the
+  next `devel` → `main` merge does not conflict; if that merge conflicts it
+  only warns and the merge must be done manually.
+- Dispatches `build.yml` on `main` with the exact commit SHA. Pushes made with
+  `GITHUB_TOKEN` do not trigger the push-based `build.yml`, so the explicit
+  dispatch is the only build and there is no double release.
+
+### Required repository settings
+- Settings → Actions → Workflow permissions must allow read and write (the
+  job requests `contents: write` and `actions: write`).
+- If `main` (or `devel`) is branch-protected, `github-actions[bot]` must be
+  allowed to push directly, otherwise the bump push fails; use a ruleset
+  bypass for GitHub Actions or a deploy key/PAT secret.
+- The PyPI trusted publisher stays configured for `build.yml` (the build is
+  dispatched, not called as a reusable workflow, so no PyPI change is needed).
 
 ---
 
@@ -157,3 +189,5 @@ current without manual tracking.
 2. Optionally trigger `build.yml` manually on `devel` to verify wheel builds
 3. If CI green → merge `devel` → `main`
 4. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release
+5. New libcurl releases need no manual step: `check-upstream.yml` commits the
+   bump to `main` (and `devel`) and dispatches the release build weekly.
