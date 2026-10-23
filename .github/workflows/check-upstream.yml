@@ -2,32 +2,26 @@ name: Check upstream LibCURL
 
 on:
   schedule:
-    # Check monthly on the 1st at 06:00 UTC
-    - cron: "0 6 1 * *"
+    # Weekly on Monday at 18:00 UTC, after the LibCURL_jll.jl weekly release
+    # (Monday 06:00 UTC) and giving Homebrew time to catch up.
+    - cron: "0 18 * * 1"
   workflow_dispatch:
+
+concurrency:
+  group: check-upstream
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
     permissions:
       actions: write
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
-
-      - name: Get current version
-        id: current
-        run: |
-          CURRENT_VER=$(python3 -c "
-          import re, pathlib
-          text = pathlib.Path('pyproject.toml').read_text()
-          m = re.search(r'version = \"(.+?)\"', text)
-          print(m.group(1))
-          ")
-          CURRENT_BASE="${CURRENT_VER%.*}"
-          echo "base=$CURRENT_BASE" >> $GITHUB_OUTPUT
-          echo "Current base version: $CURRENT_BASE"
 
       - name: Get latest upstream version
         id: upstream
@@ -35,35 +29,97 @@ jobs:
           API_RESPONSE=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
             "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest")
           LATEST_RELEASE=$(python3 -c "import json, sys; print(json.load(sys.stdin).get('tag_name', ''))" <<< "$API_RESPONSE")
-          BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
 
           if ! [[ "$LATEST_RELEASE" =~ ^LibCURL-v[0-9]+\.[0-9]+\.[0-9]+\+.+$ ]]; then
             echo "::error::Could not obtain a valid LibCURL_jll release tag: ${LATEST_RELEASE:-<empty>}"
             exit 1
           fi
+          BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
 
-          echo "base=$BASE_VERSION" >> $GITHUB_OUTPUT
+          echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "Latest upstream: $BASE_VERSION (from $LATEST_RELEASE)"
 
-      - name: Check if update needed
-        id: check
+      - name: Decide target version
+        id: target
+        env:
+          BASE: ${{ steps.upstream.outputs.base }}
         run: |
-          if [ "${{ steps.current.outputs.base }}" = "${{ steps.upstream.outputs.base }}" ]; then
-            echo "needed=false" >> $GITHUB_OUTPUT
-            echo "Already up to date with ${{ steps.upstream.outputs.base }}"
+          CURRENT_VER=$(python3 -c "import re, pathlib; print(re.search(r'^version = \"(.+?)\"', pathlib.Path('pyproject.toml').read_text(), re.M).group(1))")
+          if [ "${CURRENT_VER%.*}" = "$BASE" ]; then
+            VERSION="$CURRENT_VER"
           else
-            echo "needed=true" >> $GITHUB_OUTPUT
-            echo "New upstream version available: ${{ steps.upstream.outputs.base }}"
+            VERSION="${BASE}.1"
           fi
 
-      - name: Trigger build
-        if: steps.check.outputs.needed == 'true'
+          # Compare against what was actually released, not pyproject.toml,
+          # so a failed earlier run is retried.
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            RELEASED=true
+          else
+            RELEASED=false
+          fi
+
+          BUMP=false
+          [ "$CURRENT_VER" != "$VERSION" ] && BUMP=true
+
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "version=$VERSION"
+            echo "released=$RELEASED"
+            echo "bump=$BUMP"
+          } >> "$GITHUB_OUTPUT"
+          echo "pyproject=$CURRENT_VER target=$VERSION released=$RELEASED bump=$BUMP"
+
+      - name: Commit version bump to main
+        id: bump
+        if: steps.target.outputs.released == 'false' && steps.target.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+          BASE: ${{ steps.upstream.outputs.base }}
+        run: |
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          python3 - <<'EOF'
+          import os, pathlib
+          ver, base = os.environ["VERSION"], os.environ["BASE"]
+          p = pathlib.Path("docs/changelog.md")
+          text = p.read_text()
+          if f"## v{ver} " not in text:
+              entry = f"\n## v{ver} — TBD\n\n- Updated to libcurl v{base}.\n\n---\n"
+              head, sep, rest = text.partition("---\n")
+              p.write_text(head + sep + entry + rest)
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "Update to libcurl $BASE"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Sync bump to devel
+        if: steps.target.outputs.released == 'false' && steps.target.outputs.bump == 'true'
+        continue-on-error: true
+        run: |
+          git fetch origin devel
+          git checkout -B devel origin/devel
+          if git merge --no-edit main; then
+            git push origin devel
+          else
+            git merge --abort
+            echo "::warning::Could not merge the version bump into devel automatically; merge main into devel manually."
+          fi
+
+      - name: Trigger build at bump commit
+        if: steps.target.outputs.released == 'false'
         uses: actions/github-script@v9
+        env:
+          SHA: ${{ steps.bump.outputs.sha || steps.target.outputs.sha }}
         with:
           script: |
+            const sha = process.env.SHA;
+            core.info(`Dispatching build.yml for ${sha}`);
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'build.yml',
               ref: 'main',
+              inputs: { sha },
             });
