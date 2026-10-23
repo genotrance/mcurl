@@ -27,6 +27,7 @@ classifiers = [
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
+        "Programming Language :: Python :: 3.15",
         "Topic :: Internet :: WWW/HTTP"
 ]
 dependencies = ["cffi; implementation_name == 'cpython'"]
@@ -56,7 +57,7 @@ include-package-data = true
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
 enable = ["pypy"]
-skip = ["*-musllinux_i686", "cp314t-*", "pp*-macosx_*", "pp*-win_*"]
+skip = ["*-musllinux_i686", "cp3*t-*", "pp*-macosx_*", "pp*-win_*"]
 before-build = "rm -rf {project}/build {project}/*.so {project}/_libcurl_cffi*"
 test-requires = ["pytest", "pytest-httpbin"]
 test-command = "pytest {project}/tests -q"

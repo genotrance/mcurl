@@ -28,9 +28,9 @@ validated before it is promoted to `devel`.
 
 **`tests`** (matrix):
 - OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-15}`
-- Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, pypy3.11}`
-- Linux x86_64 tests all Python versions (CPython 3.9–3.14 + PyPy 3.11).
-- Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, pypy3.11) on
+- Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, pypy3.11}`
+- Linux x86_64 tests all Python versions (CPython 3.9–3.15 + PyPy 3.11).
+- Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, 3.15, pypy3.11) on
   native `ubuntu-24.04-arm` runners — no QEMU emulation.
 - macOS tests use `macos-15`, matching the macOS release-wheel runner and its
   Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
@@ -51,14 +51,14 @@ validated before it is promoted to `devel`.
 - Builds the cffi extension and runs `pytest` with coverage
 
 **`tests-windows`** (matrix):
-- Tests multiple Python versions (`3.9, 3.12, 3.13, 3.14`) via cibuildwheel.
+- Tests multiple Python versions (`3.9, 3.12, 3.13, 3.14, 3.15`) via cibuildwheel.
 - Uses the same `pyproject.toml` `[tool.cibuildwheel.windows]` config as the
   release build, providing confidence that Windows wheels are correct without
   running the full build matrix on every CI push.
 
 **`tests-i686`** (matrix):
 - Builds and tests 32-bit Linux wheels (`manylinux` i686) via cibuildwheel,
-  for the oldest and newest CPython (3.9, 3.14).
+  for the oldest and two newest CPython releases (3.9, 3.14, and 3.15).
 - Added because `main.yml` otherwise never runs 32-bit, yet `build.yml` ships
   i686 wheels. The release build hit a 32-bit-only failure: the auth_retry
   burst tests start 200 threads, which can exhaust the address space at the
@@ -66,7 +66,8 @@ validated before it is promoted to `devel`.
   problems before a release.
 
 The composite action `.github/actions/setup-python-env`:
-- Sets `allow-prereleases: true` so that Python 3.14 and PyPy can be installed.
+- Sets `allow-prereleases: true` so that current CPython releases and PyPy can
+  be installed before GitHub runner images provide them directly.
 - Installs `uv`, syncs dependencies, and builds the extension.
 - For PyPy: skips installing `cffi` from PyPI (PyPy ships its own built-in cffi).
 - On Linux: a separate step reads the base libcurl version from
@@ -83,11 +84,11 @@ The composite action `.github/actions/setup-python-env`:
   built-in `_cffi_backend`, producing silent ABI mismatches that cause libcurl
   to return `CURLE_URL_MALFORMED` (error 3) on every HTTP request. This does
   not affect Linux PyPy where the built-in cffi is preserved.
-- **Free-threaded Python (3.14t) is not currently supported.** `brotlicffi`
-  (a transitive dependency of `pytest-httpbin` via `httpbin`) does not have a
-  release that supports free-threaded builds as of v1.2.0.0. Support was added
-  to its `main` branch but has not been tagged/released. Re-enable once
-  `brotlicffi` publishes a compatible release.
+- **Free-threaded CPython is not shipped yet.** Although current test
+  dependencies run on 3.15t, the configured cibuildwheel release does not
+  expose free-threaded wheel identifiers. The skip pattern keeps these
+  unsupported wheel builds out of the matrix until cibuildwheel support is
+  available.
 - `jsonschema<4.18` is pinned to avoid pulling in `rpds-py` (Rust, no PyPy
   wheel) via the `httpbin → flasgger → jsonschema` chain.
 - **musllinux** is tested via cibuildwheel in `build.yml`, which builds
@@ -145,9 +146,10 @@ addition to `sha`. A dry build still exercises the complete wheel matrix and
 validates artifacts and PyPI state, but never uploads a distribution or
 creates a tag. Its own concurrency group means it cannot delay a real release.
 
-cibuildwheel skip patterns (`cp314t-*`, `pp*-macosx_*`, `pp*-win_*`,
+cibuildwheel skip patterns (`cp3*t-*`, `pp*-macosx_*`, `pp*-win_*`,
 `*-musllinux_i686`) ensure unsupported configurations are excluded from the
-build matrix.
+build matrix. CI uses cibuildwheel 4.3.4 because it recognizes the CPython
+3.15 identifiers used by the release build and focused wheel tests.
 
 ---
 

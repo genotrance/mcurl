@@ -12,6 +12,7 @@
   HTTPS requests through authenticating proxies were delayed long enough for
   TLS servers with short handshake timeouts to drop the tunnel, causing curl
   errors 35/55.
+- Added CPython 3.15 support on every supported wheel platform.
 
 ---
 

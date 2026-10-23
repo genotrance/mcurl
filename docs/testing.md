@@ -59,8 +59,12 @@ uv run python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
 ### With a specific Python version
 
 ```bash
-uv run -p 3.14 python -m pytest tests -q
+uv run -p 3.15 python -m pytest tests -q
 ```
+
+CI runs the full suite on CPython 3.9 through 3.15. Run the command above
+before adding support for a newly released CPython version so the local build,
+cffi extension, and test dependencies are exercised together.
 
 ---
 

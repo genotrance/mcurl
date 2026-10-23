@@ -98,8 +98,6 @@ builds are enabled for Linux only.
 Several configurations are skipped because they are unsupported or broken:
 
 - **i686 musl** — no demand for 32-bit Alpine wheels.
-- **Free-threaded CPython (3.14t)** — deferred because `brotlicffi` (a
-  transitive test dependency) has not published a compatible release.
 - **macOS PyPy** — cffi 2.x from PyPI overwrites PyPy’s built-in
   `_cffi_backend`, causing silent ABI mismatches that produce
   `CURLE_URL_MALFORMED` on every request. Linux PyPy is unaffected.
@@ -123,8 +121,10 @@ cache starts empty.
 ## Wheel matrix
 
 For CPython, a single `cp39-abi3` wheel is produced per platform/arch,
-compatible with any CPython ≥ 3.9. For PyPy, a separate wheel is produced per
-PyPy version (Linux only).
+compatible with any non-free-threaded CPython ≥ 3.9. Free-threaded CPython
+cannot use the stable ABI and is not shipped until cibuildwheel provides its
+wheel identifiers. For PyPy, a separate wheel is produced per PyPy version
+(Linux only).
 
 The macOS arm64 wheel requires macOS 15 or later. Since 8.23.0.1 it has been
 built on the `macos-15` runner and bundles Homebrew's curl dependency closure.
