@@ -57,7 +57,7 @@ include-package-data = true
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
 enable = ["pypy"]
-skip = ["*-musllinux_i686", "cp3*t-*", "pp*-macosx_*", "pp*-win_*"]
+skip = ["*-musllinux_i686", "cp314t-*", "pp*-macosx_*", "pp*-win_*"]
 before-build = "rm -rf {project}/build {project}/*.so {project}/_libcurl_cffi*"
 test-requires = ["pytest", "pytest-httpbin"]
 test-command = "pytest {project}/tests -q"
