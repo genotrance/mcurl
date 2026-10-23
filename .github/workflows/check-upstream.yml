@@ -6,17 +6,29 @@ on:
     # (Monday 06:00 UTC) and giving Homebrew time to catch up.
     - cron: "0 18 * * 1"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log the release plan without changing GitHub or PyPI"
+        required: false
+        default: false
+        type: boolean
 
+# This also serializes against build.yml releases from a manual main push.
 concurrency:
-  group: check-upstream
+  group: ${{ inputs.dry_run && format('check-upstream-dry-run-{0}', github.run_id) || 'release-main' }}
   cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
     permissions:
-      actions: write
-      contents: write
+      contents: read
+    outputs:
+      head_sha: ${{ steps.target.outputs.head_sha }}
+      version: ${{ steps.target.outputs.version }}
+      bump: ${{ steps.target.outputs.bump }}
+      release_needed: ${{ steps.target.outputs.release_needed }}
+      dry_run: ${{ steps.target.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -34,84 +46,157 @@ jobs:
             echo "::error::Could not obtain a valid LibCURL_jll release tag: ${LATEST_RELEASE:-<empty>}"
             exit 1
           fi
-          BASE_VERSION=$(echo "$LATEST_RELEASE" | sed -E 's/^LibCURL-v([^+]+)\+.*/\1/')
-
-          echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Latest upstream: $BASE_VERSION (from $LATEST_RELEASE)"
+          echo "tag=$LATEST_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $LATEST_RELEASE"
 
       - name: Decide target version
         id: target
         env:
-          BASE: ${{ steps.upstream.outputs.base }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: |
           CURRENT_VER=$(python3 -c "import re, pathlib; print(re.search(r'^version = \"(.+?)\"', pathlib.Path('pyproject.toml').read_text(), re.M).group(1))")
-          if [ "${CURRENT_VER%.*}" = "$BASE" ]; then
-            VERSION="$CURRENT_VER"
+          TARGET=$(python3 tools/release_decision.py \
+            --current "$CURRENT_VER" --upstream-tag "$UPSTREAM_TAG" --tag-exists false | sed -n 's/^target=//p')
+          if git rev-parse -q --verify "refs/tags/v$TARGET" >/dev/null; then
+            TAG_EXISTS=true
           else
-            VERSION="${BASE}.1"
+            TAG_EXISTS=false
           fi
 
-          # Compare against what was actually released, not pyproject.toml,
-          # so a failed earlier run is retried.
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            RELEASED=true
-          else
-            RELEASED=false
-          fi
-
-          BUMP=false
-          [ "$CURRENT_VER" != "$VERSION" ] && BUMP=true
-
+          python3 tools/release_decision.py \
+            --current "$CURRENT_VER" --upstream-tag "$UPSTREAM_TAG" --tag-exists "$TAG_EXISTS" >> "$GITHUB_OUTPUT"
+          HEAD_SHA=$(git rev-parse HEAD)
           {
-            echo "sha=$(git rev-parse HEAD)"
-            echo "version=$VERSION"
-            echo "released=$RELEASED"
-            echo "bump=$BUMP"
+            echo "head_sha=$HEAD_SHA"
+            echo "version=$TARGET"
+            echo "dry_run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
-          echo "pyproject=$CURRENT_VER target=$VERSION released=$RELEASED bump=$BUMP"
 
-      - name: Commit version bump to main
-        id: bump
-        if: steps.target.outputs.released == 'false' && steps.target.outputs.bump == 'true'
+          echo "upstream=$UPSTREAM_TAG pyproject=$CURRENT_VER target=$TARGET tag_exists=$TAG_EXISTS"
+          if [ "$DRY_RUN" = true ]; then
+            echo "::notice::Dry run: release_needed and bump above are a plan only."
+            if [ "$CURRENT_VER" != "$TARGET" ]; then
+              echo "::notice::Dry run: would commit pyproject.toml and docs/changelog.md on main."
+              echo "::notice::Dry run: build SHA would be the new bump commit with parent $HEAD_SHA."
+            elif [ "$TAG_EXISTS" = false ]; then
+              echo "::notice::Dry run: would build exact existing main SHA $HEAD_SHA."
+            else
+              echo "::notice::Dry run: no commit or build would be needed."
+            fi
+          fi
+
+  macos-ready:
+    needs: check
+    if: needs.check.outputs.release_needed == 'true'
+    runs-on: macos-15
+    outputs:
+      ready: ${{ steps.curl.outputs.ready }}
+    steps:
+      - name: Check Homebrew curl availability
+        id: curl
         env:
-          VERSION: ${{ steps.target.outputs.version }}
-          BASE: ${{ steps.upstream.outputs.base }}
+          EXPECTED: ${{ needs.check.outputs.version }}
         run: |
+          EXPECTED_BASE=${EXPECTED%.*}
+          if ! brew update; then
+            echo "::warning::Homebrew update failed; defer this release until next week."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          brew upgrade curl || true
+          if ! INSTALLED=$("$(brew --prefix curl)/bin/curl" --version | sed -n '1s/curl \([^ ]*\).*/\1/p'); then
+            echo "::warning::Homebrew curl is unavailable; defer this release until next week."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$INSTALLED" != "$EXPECTED_BASE" ]; then
+            echo "::warning::Homebrew curl is $INSTALLED, waiting for $EXPECTED_BASE before releasing."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "Homebrew curl $INSTALLED is ready for $EXPECTED."
+
+  prepare-and-dispatch:
+    needs: [check, macos-ready]
+    if: needs.check.outputs.release_needed == 'true' && needs.macos-ready.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Prepare committed release version
+        id: prepare
+        env:
+          CHECKED_MAIN_SHA: ${{ needs.check.outputs.head_sha }}
+          VERSION: ${{ needs.check.outputs.version }}
+          BUMP: ${{ needs.check.outputs.bump }}
+          DRY_RUN: ${{ needs.check.outputs.dry_run }}
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$CHECKED_MAIN_SHA" ]; then
+            echo "::error::main changed after the release decision; retry so the version plan is recalculated."
+            exit 1
+          fi
+          git checkout --detach "$CHECKED_MAIN_SHA"
+
+          if [ "$BUMP" = false ]; then
+            echo "sha=$CHECKED_MAIN_SHA" >> "$GITHUB_OUTPUT"
+            echo "Building existing main commit $CHECKED_MAIN_SHA."
+            exit 0
+          fi
+
+          if [ "$DRY_RUN" = true ]; then
+            echo "::notice::Dry run: would commit libcurl version $VERSION to main."
+            echo "::notice::Dry run: would dispatch the resulting bump commit."
+            exit 0
+          fi
+
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           python3 - <<'EOF'
-          import os, pathlib
-          ver, base = os.environ["VERSION"], os.environ["BASE"]
-          p = pathlib.Path("docs/changelog.md")
-          text = p.read_text()
-          if f"## v{ver} " not in text:
-              entry = f"\n## v{ver} — TBD\n\n- Updated to libcurl v{base}.\n\n---\n"
-              head, sep, rest = text.partition("---\n")
-              p.write_text(head + sep + entry + rest)
+          import os
+          import pathlib
+
+          version = os.environ["VERSION"]
+          base = version.rsplit(".", 1)[0]
+          changelog = pathlib.Path("docs/changelog.md")
+          text = changelog.read_text()
+          if f"## v{version} " not in text:
+              entry = f"\n## v{version} — TBD\n\n- Updated to libcurl v{base}.\n\n---\n"
+              head, separator, rest = text.partition("---\n")
+              changelog.write_text(head + separator + entry + rest)
           EOF
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "Update to libcurl $BASE"
+          git commit -am "Update to libcurl ${VERSION%.*}"
           git push origin HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Sync bump to devel
-        if: steps.target.outputs.released == 'false' && steps.target.outputs.bump == 'true'
-        continue-on-error: true
+      - name: Fast-forward devel to the bump
+        if: needs.check.outputs.bump == 'true' && needs.check.outputs.dry_run != 'true'
+        env:
+          RELEASE_SHA: ${{ steps.prepare.outputs.sha }}
         run: |
           git fetch origin devel
-          git checkout -B devel origin/devel
-          if git merge --no-edit main; then
-            git push origin devel
-          else
-            git merge --abort
-            echo "::warning::Could not merge the version bump into devel automatically; merge main into devel manually."
+          if ! git merge-base --is-ancestor origin/devel "$RELEASE_SHA"; then
+            echo "::warning::devel has diverged from main; leaving it unchanged. Merge main into devel manually."
+            exit 0
+          fi
+          if ! git push origin "$RELEASE_SHA:devel"; then
+            echo "::warning::Could not fast-forward devel; leaving it unchanged. Merge main into devel manually."
           fi
 
-      - name: Trigger build at bump commit
-        if: steps.target.outputs.released == 'false'
+      - name: Trigger build at committed SHA
+        if: needs.check.outputs.dry_run != 'true'
         uses: actions/github-script@v9
         env:
-          SHA: ${{ steps.bump.outputs.sha || steps.target.outputs.sha }}
+          SHA: ${{ steps.prepare.outputs.sha }}
         with:
           script: |
             const sha = process.env.SHA;
@@ -121,5 +206,5 @@ jobs:
               repo: context.repo.repo,
               workflow_id: 'build.yml',
               ref: 'main',
-              inputs: { sha },
+              inputs: { sha, dry_run: 'false' },
             });

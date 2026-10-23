@@ -9,7 +9,7 @@ Three workflows power the CI/CD pipeline:
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | CI | `main.yml` | push to `main`/`devel`/`working`, PRs | Code quality + test matrix |
-| Build wheels | `build.yml` | push to `main`/`devel`, manual dispatch | Build + publish to PyPI |
+| Build wheels | `build.yml` | push to `main`, manual dispatch | Build + publish to PyPI |
 | Check upstream | `check-upstream.yml` | weekly cron (Mon 18:00 UTC), manual | Commit version bump and release new libcurl |
 
 ---
@@ -108,7 +108,10 @@ Builds wheels for all platforms using cibuildwheel and publishes to PyPI.
   `pyproject.toml` instead of deriving one; `check-upstream.yml` uses it so the
   build cannot drift to a moving branch head.
 
-Release runs are serialized per ref through a `concurrency` group.
+Actual `main` releases share the `release-main` concurrency group with the
+weekly upstream check. This prevents a manually pushed `main` release and a
+scheduled release decision from acting on stale state at the same time. A
+queued release re-checks the `main` SHA before it commits anything.
 
 ### Jobs
 
@@ -130,7 +133,10 @@ Release runs are serialized per ref through a `concurrency` group.
    [trusted publisher](https://docs.pypi.org/trusted-publishers/) and tags
    the release commit only after the upload succeeded.
 
-Publishing only happens on pushes to `main`.
+Publishing only happens for `main`. `workflow_dispatch` accepts `dry_run` in
+addition to `sha`. A dry build still exercises the complete wheel matrix and
+validates artifacts and PyPI state, but never uploads a distribution or
+creates a tag. Its own concurrency group means it cannot delay a real release.
 
 cibuildwheel skip patterns (`cp314t-*`, `pp*-macosx_*`, `pp*-win_*`,
 `*-musllinux_i686`) ensure unsupported configurations are excluded from the
@@ -149,20 +155,55 @@ build matrix.
 - Fails without dispatching a build if the API response does not contain a
   valid release tag, preventing a transient lookup failure from rebuilding an
   already-published version.
-- Computes the target version (the `pyproject.toml` version on `main` if its
-  base already matches upstream, otherwise `<upstream>.1`) and decides whether
-  a release is needed by checking for the `v<target>` tag, i.e. what was
-  actually released, not `pyproject.toml`. A failed run (for example Homebrew
-  lagging, which fails the macOS version assertion) therefore leaves the tag
-  missing and the next weekly run retries.
+- Computes the target version with `tools/release_decision.py` (the
+  `pyproject.toml` version on `main` if its base already matches upstream,
+  otherwise `<upstream>.1`) and decides whether a release is needed by
+  checking for the `v<target>` tag. The tag is the completion marker because
+  `build.yml` creates it only after PyPI upload succeeds. A missing tag
+  therefore retries an interrupted build safely: an existing PyPI version
+  skips upload and creates only its missing tag.
+- Before changing `main`, a macOS runner refreshes Homebrew and verifies that
+  Homebrew curl has reached the required base version. If Homebrew is behind
+  (or unavailable), the workflow logs a warning and makes no commit or
+  dispatch; the following weekly run tries again. This prevents a release
+  from starting and later failing after the non-macOS wheels have built.
 - If `pyproject.toml` needs bumping it updates it, adds a
   "Updated to libcurl" entry to `docs/changelog.md`, commits and pushes to
-  `main` *before* anything is built. It then merges `main` into `devel` so the
-  next `devel` → `main` merge does not conflict; if that merge conflicts it
-  only warns and the merge must be done manually.
+  `main` *before* anything is built. It fast-forwards `devel` only when
+  `devel` is already an ancestor of that commit. A diverged `devel` is left
+  untouched and reported as a warning, avoiding a force-push or automatic
+  merge commit.
 - Dispatches `build.yml` on `main` with the exact commit SHA. Pushes made with
   `GITHUB_TOKEN` do not trigger the push-based `build.yml`, so the explicit
   dispatch is the only build and there is no double release.
+
+### Safe dry run
+
+Use **Actions → Check upstream LibCURL → Run workflow**, enable `dry_run`, and
+run it on `main`. The workflow obtains the upstream tag, calculates the target
+and tag state, checks the macOS Homebrew prerequisite when a release is due,
+and logs the files it would commit plus the exact existing SHA (or the parent
+of the new bump commit) it would build. It does not commit, push, dispatch a
+workflow, upload to PyPI, or tag. To exercise the wheel build separately,
+dispatch **Build wheels** on `main` with `dry_run` enabled and, optionally,
+the SHA reported by the upstream check. That run builds and verifies all
+artifacts but logs instead of uploading or tagging.
+
+### Operator recovery
+
+- If the upstream check reports that `main` changed while it was queued, run
+  the dry run again and then retry the normal workflow; never reuse a stale
+  plan.
+- If Homebrew is behind, wait for the next weekly run (or retry after
+  Homebrew has published the matching curl). Do not bypass the macOS check.
+- If the version bump reaches `main` but `devel` is reported as diverged,
+  merge `main` into `devel` through the normal review process; the release
+  itself can continue because its SHA is already fixed.
+- If a build fails before PyPI upload, rerun `build.yml` with the reported
+  SHA. If upload succeeds but tagging fails, rerun the same SHA: the PyPI
+  check skips the duplicate upload and creates the missing tag.
+- If a tag exists while PyPI does not, stop and investigate before releasing:
+  that state should not be produced by this flow because tagging is last.
 
 ### Required repository settings
 - Settings → Actions → Workflow permissions must allow read and write (the

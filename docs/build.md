@@ -147,4 +147,7 @@ the fourth is incremented for mcurl-specific releases against the same libcurl.
 The committed `pyproject.toml` version is the release version: when libcurl
 moves, `check-upstream.yml` commits the bump to `main` before building, and the
 `build.yml` publish job refuses to publish or tag if the built version differs
-from `pyproject.toml` at the tagged commit. See `docs/ci.md`.
+from `pyproject.toml` at the tagged commit. `build.yml` also supports a
+`dry_run` dispatch input so the complete wheel build and artifact checks can be
+performed without publishing or tagging. See `docs/ci.md` for the release
+workflow and operator procedure.
