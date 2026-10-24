@@ -18,6 +18,8 @@ from .test_auth_retry import TARGET, _concurrent, _FakeProxy
 ROUNDS = int(os.environ.get("AUTH_RETRY_ROUNDS", "1"))
 INTERVAL = 1.5
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def proxy():

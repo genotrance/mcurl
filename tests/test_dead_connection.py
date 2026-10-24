@@ -39,6 +39,7 @@ def _url(address):
     return f"http://{address[0]}:{address[1]}/"
 
 
+@pytest.mark.slow
 def test_stalled_http_body_times_out(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -60,6 +61,7 @@ def test_stalled_http_body_times_out(local_server):
     multi.close()
 
 
+@pytest.mark.slow
 def test_slow_steady_download_survives_low_speed_guard(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -78,6 +80,7 @@ def test_slow_steady_download_survives_low_speed_guard(local_server):
     multi.close()
 
 
+@pytest.mark.slow
 def test_connect_tunnel_has_no_low_speed_deadline(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -97,6 +100,7 @@ def test_connect_tunnel_has_no_low_speed_deadline(local_server):
     multi.close()
 
 
+@pytest.mark.slow
 def test_silent_proxy_connect_obeys_connect_timeout(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -234,6 +238,7 @@ class _MultiRoundAuthProxy(socketserver.BaseRequestHandler):
             return
 
 
+@pytest.mark.slow
 def test_concurrent_multi_round_connect_auth_is_not_stalled(local_server, monkeypatch):
     # pymcurl 8.23.0.1 slept a full MULTI_SELECT_TIMEOUT whenever a do() loop
     # saw no sockets and no libcurl timer; concurrent tunnels then stalled
