@@ -5,6 +5,8 @@ import threading
 import time
 from unittest.mock import patch
 
+import pytest
+
 import mcurl
 
 
@@ -113,6 +115,7 @@ class TestSelectPartialWrite:
         server_local.close()
         m.close()
 
+    @pytest.mark.slow
     def test_idle_timeout_honoured_after_partial_write(self):
         """After a partial write fully drains, the idle timeout should fire
         if no more data arrives.  This verifies the fix works end-to-end:

@@ -55,6 +55,8 @@ validated before it is promoted to `devel`.
 - Uses the same `pyproject.toml` `[tool.cibuildwheel.windows]` config as the
   release build, providing confidence that Windows wheels are correct without
   running the full build matrix on every CI push.
+- Overrides `test-skip` with an empty value so every interpreter in the matrix
+  runs the full suite, instead of the smoke-only policy the release build uses.
 
 **`tests-i686`** (matrix):
 - Builds and tests 32-bit Linux wheels (`manylinux` i686) via cibuildwheel,
@@ -64,6 +66,9 @@ validated before it is promoted to `devel`.
   burst tests start 200 threads, which can exhaust the address space at the
   default 8 MB stack size. Running this job on every push catches such
   problems before a release.
+- Overrides the `pyproject.toml` cibuildwheel `test-command` and `test-skip` so
+  that it keeps running the full suite on all three interpreters. The default
+  there is the short wheel smoke selection; see `docs/testing.md`.
 
 The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that current CPython releases and PyPy can
@@ -144,6 +149,11 @@ Publishing only happens for `main`. `workflow_dispatch` accepts `dry_run` in
 addition to `sha`. A dry build still exercises the complete wheel matrix and
 validates artifacts and PyPI state, but never uploads a distribution or
 creates a tag. Its own concurrency group means it cannot delay a real release.
+
+The release build tests each wheel with the short smoke selection only, on the
+oldest and newest CPython, free-threaded 3.15 and one PyPy build per platform
+(configured in `pyproject.toml`; see `docs/testing.md`). All wheels are still
+built.
 
 cibuildwheel skip patterns (`cp314t-*`, `pp*-macosx_*`, `pp*-win_*`,
 `*-musllinux_i686`) ensure unsupported configurations are excluded from the

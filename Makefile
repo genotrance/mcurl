@@ -21,6 +21,14 @@ check: ## Run code quality tools
 test: ## Run the test suite with coverage
 	@uv run python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
 
+.PHONY: test-fast
+test-fast: ## Run the test suite without the slow tests
+	@uv run python -m pytest tests -m "not slow" -q
+
+.PHONY: test-smoke
+test-smoke: ## Run the wheel smoke selection
+	@uv run python -m pytest tests -m smoke -q
+
 .PHONY: build
 build: clean ## Build sdist and wheel
 	@TMP=$(TMP) uv build
