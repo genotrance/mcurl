@@ -271,6 +271,22 @@ tracked `uv.lock` (`uv` ecosystem) monthly, grouping minor and patch lock
 updates. This keeps pinned action versions (e.g. `actions/checkout`) and
 locked dependencies current without manual tracking.
 
+The `uv` ecosystem has ignore rules because mcurl still supports Python 3.9,
+which newer releases of some dependencies dropped. Dependabot's uv updater
+upgrades one package at a time to a forced version, and uv treats that as a
+hard requirement for every supported Python, so such a bump cannot resolve on
+3.9. Ignored updates:
+
+- `cffi`: it appears in `[build-system] requires`, which Dependabot cannot
+  update, and its runtime release needs Python 3.10+. Bump it by hand when
+  support for 3.9 is dropped.
+- `pytest` 9.x and later: requires Python 3.10+; 8.x stays on 3.9.
+- `jsonschema` 4.18 and later: `jsonschema<4.18` is pinned on purpose for PyPy
+  (see `docs/build.md`).
+
+`uv lock` itself still resolves a separate version per Python version, so the
+lock keeps working on 3.9-3.15 without these ignore rules.
+
 ---
 
 ## Deployment flow
