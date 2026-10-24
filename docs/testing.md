@@ -49,8 +49,8 @@ so the full suite always includes every test.
 
 | Selection | Command | Purpose |
 |-----------|---------|---------|
-| Full | `uv run python -m pytest tests -q` (or `make test` for coverage) | Everything, including slow tests. This is what CI test jobs and release validation run |
-| Fast | `uv run python -m pytest tests -m "not slow" -q` (or `make test-fast`) | Local iteration; everything except the slow tests |
+| Full | `uv run python -m pytest tests -q` (or `make test` for coverage) | Everything, including slow tests. This is what the weekly full CI lane, the i686 CI job and release validation run |
+| Fast | `uv run python -m pytest tests -m "not slow" -q` (or `make test-fast`) | Local iteration and the push/PR fast CI lane; everything except the slow tests |
 | Wheel smoke | `uv run python -m pytest tests -m smoke -q` (or `make test-smoke`) | Short check of an installed wheel; what cibuildwheel runs |
 
 **`slow`** marks tests that spend most of their time waiting on real time: the
@@ -83,9 +83,10 @@ supported CPython window changes (a new release, or an end of life), update the
 `test-skip` list so the oldest and newest CPython stay tested.
 
 The CI jobs that call cibuildwheel only to test (`tests-windows` and
-`tests-i686` in `main.yml`) override both `test-command` and `test-skip` so they
-keep running the full suite, including the 200-thread burst tests that exist to
-catch 32-bit address space exhaustion, on every interpreter in their matrix.
+`tests-i686` in `main.yml`) override both `test-command` and `test-skip`. `tests-i686` always runs the
+full suite, including the 200-thread burst tests that exist to catch 32-bit
+address space exhaustion; `tests-windows` runs the fast selection on pushes
+and the full suite in the weekly full lane (see `docs/ci.md`).
 
 ### Manual run
 
@@ -116,7 +117,7 @@ uv run python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
 uv run -p 3.15 python -m pytest tests -q
 ```
 
-CI runs the full suite on CPython 3.9 through 3.15. Run the command above
+The weekly full CI lane runs the full suite on CPython 3.9 through 3.15. Run the command above
 before adding support for a newly released CPython version so the local build,
 cffi extension, and test dependencies are exercised together.
 
