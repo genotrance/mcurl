@@ -19,7 +19,7 @@ Tests are split across multiple files in `tests/`:
 | `test_auth_retry.py` | Local fake-proxy tests for proxies blocked after 407s: default latch, single probe per interval under a concurrent burst, recovery, re-block and backoff, probe slot release, `reset_proxy_failures()` |
 | `test_auth_retry_burst.py` | Burst load on the same fake proxy: 10/50/200 threads through `MCurl.do()` (multi and easy interface) while the proxy rejects, recovers, is down or stalls, checking that exactly one authentication request reaches the proxy per interval, the probe slot is never left stuck, and `auth_retry=0` still latches. `AUTH_RETRY_ROUNDS=<n>` repeats every scenario n times. The burst client threads and the fake proxy's per-connection handler threads are started with 256 KiB stacks (see `_small_stacks()` in `test_auth_retry.py`), because 200 threads at the default 8 MB can exhaust a 32-bit address space. Burst sizes are the same on every platform, so 32-bit runs check the same behaviour as 64-bit |
 | `test_dead_connection.py` | Local fake-upstream tests for stalled bodies, slow transfers, CONNECT tunnels, keepalive socket settings, and bounded multi waits. Also guards the v8.23.0.1 regression where `do()` slept the full select cap with no sockets to wait on: unit checks that `_perform()` never sleeps without a libcurl timer and never waits for a handle another thread already finished, plus a stress test that runs rounds of concurrent CONNECTs through a fake proxy answering 407 then 200 on a kept-alive connection (multi-round proxy auth, as px does) and fails if any `do()` loop sleeps for `MULTI_SELECT_TIMEOUT`. `MULTI_ROUND_ROUNDS` and `MULTI_ROUND_WIDTH` tune its rounds and concurrency |
-| `test_smoke.py` | Wheel smoke selection (`smoke` marker): libcurl loads, TLS and HTTP(S) are present, the libcurl version matches `pyproject.toml`, real HTTP and HTTPS requests succeed through `Curl` and `MCurl`, `cacert.pem` ships in the package, an untrusted certificate is rejected as a verification failure, and an installed wheel contains a bundled libcurl (skipped when not running from an installed wheel) |
+| `test_smoke.py` | Wheel smoke selection (`smoke` marker): libcurl loads, TLS and HTTP(S) are present, the libcurl version matches `pyproject.toml`, real HTTP and HTTPS requests succeed through `Curl` and `MCurl`, `cacert.pem` ships in the package, an untrusted certificate is rejected as a verification failure, and an installed wheel contains a bundled libcurl (skipped when not running from an installed wheel; fails instead under cibuildwheel, with paths normalised via realpath and normcase), and, under `CIBUILDWHEEL`, `mcurl` and `_libcurl_cffi` are imported from site-packages rather than the checkout |
 | `test_selection.py` | Checks that the `slow`, `not slow` and `smoke` selections partition the suite as described below, by running `pytest --collect-only` in a subprocess |
 
 The dead-connection tests use only loopback sockets. They verify that keepalive
@@ -83,10 +83,16 @@ supported CPython window changes (a new release, or an end of life), update the
 `test-skip` list so the oldest and newest CPython stay tested.
 
 The CI jobs that call cibuildwheel only to test (`tests-windows` and
-`tests-i686` in `main.yml`) override both `test-command` and `test-skip`. `tests-i686` always runs the
+`tests-i686` and `tests-musl` in `main.yml`) override both `test-command` and `test-skip`. `tests-i686` always runs the
 full suite, including the 200-thread burst tests that exist to catch 32-bit
 address space exhaustion; `tests-windows` runs the fast selection on pushes
 and the full suite in the weekly full lane (see `docs/ci.md`).
+
+The cibuildwheel test commands pass `-rs` so skips show in the logs and
+`--import-mode=importlib` so pytest does not put the checkout on `sys.path`;
+otherwise the tests would import `mcurl` from the source tree rather than the
+installed wheel. `tests/test_release_decision.py` therefore loads
+`tools/release_decision.py` by file path.
 
 ### Manual run
 

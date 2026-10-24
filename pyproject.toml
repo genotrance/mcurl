@@ -60,7 +60,7 @@ enable = ["pypy"]
 skip = ["*-musllinux_i686", "cp314t-*", "pp*-macosx_*", "pp*-win_*"]
 before-build = "rm -rf {project}/build {project}/*.so {project}/_libcurl_cffi*"
 test-requires = ["pytest", "pytest-httpbin"]
-test-command = "pytest {project}/tests -q -m smoke"
+test-command = "pytest {project}/tests -q -rs --import-mode=importlib -m smoke"
 # Every wheel is still built; the smoke selection runs only on the oldest and newest CPython, one free-threaded
 # build (cp315t) and one PyPy build (pp311). The abi3 wheel is identical across the skipped CPython versions.
 test-skip = ["cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*", "pp312-*"]

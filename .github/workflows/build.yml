@@ -132,7 +132,7 @@ jobs:
       - name: Ensure Homebrew libcurl matches pyproject (macOS)
         if: runner.os == 'macOS'
         run: |
-          bash tools/brew_curl.sh
+          bash tools/brew_curl.sh --release
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.3.4
