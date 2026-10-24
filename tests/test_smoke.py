@@ -18,13 +18,33 @@ pytestmark = pytest.mark.smoke
 LIB_SUFFIXES = (".dll", ".dylib", ".so")
 
 
+def _norm(path):
+    "Canonical form for comparing paths (symlinks such as /var vs /private/var, Windows case and 8.3 names)"
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _site_roots():
+    return {_norm(sysconfig.get_paths()[k]) for k in ("purelib", "platlib")}
+
+
 def _installed_extension_dir():
     "Directory of the compiled extension when mcurl runs from an installed wheel, else None"
     import _libcurl_cffi
 
     extdir = os.path.dirname(os.path.abspath(_libcurl_cffi.__file__))
-    roots = {os.path.abspath(sysconfig.get_paths()[k]) for k in ("purelib", "platlib")}
-    return extdir if extdir in roots else None
+    return extdir if _norm(extdir) in _site_roots() else None
+
+
+def test_wheel_imported_from_site_packages():
+    # cibuildwheel must test the installed wheel, not the checkout that pytest's import mode may put first on sys.path
+    if not os.environ.get("CIBUILDWHEEL"):
+        pytest.skip("not running under cibuildwheel")
+    import _libcurl_cffi
+
+    roots = _site_roots()
+    for mod in (mcurl, _libcurl_cffi):
+        where = _norm(os.path.dirname(os.path.abspath(mod.__file__)))
+        assert where in roots or os.path.dirname(where) in roots, f"{mod.__name__} imported from {where}, not {roots}"
 
 
 def test_import_loads_libcurl():
@@ -87,6 +107,7 @@ def test_wheel_bundles_libcurl():
     # auditwheel (Linux), delocate (macOS) and delvewheel (Windows) must have copied libcurl into the wheel
     extdir = _installed_extension_dir()
     if extdir is None:
+        assert not os.environ.get("CIBUILDWHEEL"), "cibuildwheel must test the installed wheel, not a source tree"
         pytest.skip("not an installed wheel: libcurl comes from the build environment")
     bundled = []
     for root, dirs, files in os.walk(extdir):

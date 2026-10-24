@@ -1,8 +1,20 @@
 """Regression cases for the state machine used by the release workflow."""
 
+import importlib.util
+import os
+import sys
+
 import pytest
 
-from tools.release_decision import decide_release
+# Loaded by path so the tests do not need the checkout on sys.path, which would shadow the installed wheel
+_spec = importlib.util.spec_from_file_location(
+    "release_decision", os.path.join(os.path.dirname(__file__), "..", "tools", "release_decision.py")
+)
+assert _spec is not None and _spec.loader is not None
+_module = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _module
+_spec.loader.exec_module(_module)
+decide_release = _module.decide_release
 
 
 def test_same_version_already_released() -> None:
