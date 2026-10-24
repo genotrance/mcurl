@@ -8,7 +8,7 @@ Three workflows power the CI/CD pipeline:
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
-| CI | `main.yml` | push to `main`/`devel`/`working`, PRs | Code quality + test matrix |
+| CI | `main.yml` | push to `main`/`devel`/`working`, PRs (fast lane); weekly cron Sat 03:00 UTC and manual dispatch with `full` (full lane) | Code quality + test matrix |
 | Build wheels | `build.yml` | push to `main`, manual dispatch | Build + publish to PyPI |
 | Check upstream | `check-upstream.yml` | weekly cron (Mon 18:00 UTC), manual | Commit version bump and release new libcurl |
 
@@ -16,28 +16,107 @@ Three workflows power the CI/CD pipeline:
 
 ## CI (`main.yml`)
 
-Runs code quality checks and the test suite across multiple Python versions and
-operating systems. Pushes to `working` run the same checks so work can be
-validated before it is promoted to `devel`.
+Runs code quality checks and the test suite. A small `plan` job selects one of
+two lanes and emits the job matrices, so both lanes share the same job
+definitions.
+
+### Lanes
+
+**Fast lane** — every push to `main`/`devel`/`working` and every pull request
+(and a manual dispatch without `full`). Tests run with `-m "not slow"` except
+where noted:
+
+| Job | Configuration | Why it is in the fast lane |
+|-----|---------------|----------------------------|
+| `tests` | Linux x86_64 CPython 3.9 | oldest supported CPython |
+| `tests` | Linux x86_64 CPython 3.15 | newest supported CPython |
+| `tests` | Linux x86_64 PyPy 3.11 | PyPy-only path (built-in cffi, no cffi install) |
+| `tests` | Linux aarch64 CPython 3.15 | only arm64 Linux code path outside the release build |
+| `tests` | macOS 15 arm64 CPython 3.15 | only Homebrew-libcurl path and `DYLD_LIBRARY_PATH`/rpath setup |
+| `tests-windows` | Windows AMD64 cp315 | newest CPython on Windows; mingw32 build and delvewheel repair |
+| `tests-i686` | manylinux i686 cp315, **full suite** | 32-bit address-space limit; the slow burst tests are the ones that broke i686, so this job never skips them |
+
+**Full lane** — the weekly schedule (Saturday 03:00 UTC, runs from the default
+branch `devel`) and `workflow_dispatch` with `full` enabled. No marker filter,
+so slow tests run everywhere:
+
+- Linux x86_64: CPython 3.9–3.15 and PyPy 3.11.
+- Linux aarch64: CPython 3.9, 3.13, 3.14, 3.15 and PyPy 3.11 (native
+  `ubuntu-24.04-arm` runners, no QEMU).
+- macOS 15 arm64: CPython 3.9–3.15.
+- Windows AMD64 (cibuildwheel): cp39, cp312, cp313, cp314, cp315 and
+  free-threaded cp315t.
+- Linux wheels (cibuildwheel): i686 cp39, cp314, cp315 and free-threaded
+  cp315t on manylinux x86_64.
+
+musllinux and the remaining architecture/interpreter wheel combinations are
+covered by `build.yml` (see below), whose dry run is the pre-release gate.
+The full lane keeps every exclusion the previous single matrix had: no PyPy on
+macOS or Windows, no `cp314t`, no musllinux i686.
+
+### Rationale and baseline
+
+Baseline (before the split): devel CI run 40019820063 (2026-10-23) ran 29 jobs
+for every push and took 15 min 15 s from creation to completion. Linux jobs
+took 2–3 min, Windows and i686 cibuildwheel jobs 3–4 min, and each of the
+seven macOS jobs 5–6 min, of which 61–124 s was the Homebrew
+`brew update`/`brew upgrade curl` step (earlier runs such as 39668753800
+spent 15–20 min there). macOS runners are the most expensive, so seven macOS
+jobs per push dominated cost. The fast selection (`-m "not slow"`) measured
+32.9 s against 127.6 s for the full suite locally on Linux x86_64 3.15
+(`docs/testing.md`).
+
+The fast lane cuts routine CI to 7 test jobs with one macOS job, while each
+platform- or architecture-specific code path still runs on every push. The
+weekly full lane and the `build.yml` dry run before a release retain complete
+interpreter, OS, architecture and slow-test coverage.
+
+### Homebrew curl on macOS
+
+`tools/brew_curl.sh` (used by `main.yml` and `build.yml`) replaces the
+previous unconditional `brew update && brew upgrade curl`. It disables
+Homebrew's automatic update, cleanup and dependents checks, and compares the
+preinstalled curl with the libcurl base version in `pyproject.toml`. Only on a
+mismatch does it read the current curl version from the Homebrew formula API
+(`formulae.brew.sh`); if that is not the expected version it fails
+immediately, otherwise it refreshes only the API metadata and upgrades (or
+installs) curl alone. A final hard assertion that installed curl equals the
+pyproject base version is kept, because a dependency-link warning can make a
+successful upgrade exit nonzero and because a stale curl must never be used
+to build or test. `check-upstream.yml` keeps its own Homebrew check.
+
+### Collecting after numbers
+
+These require GitHub and must be run by the operator:
+
+1. Fast lane: push the change to `working` (or `devel`), then
+   `gh run list -R genotrance/mcurl -w CI -b working -L 1` and
+   `gh run view <id> -R genotrance/mcurl --json jobs --jq '.jobs[] | [.name, .startedAt, .completedAt] | @tsv'`.
+   Expect 1 plan + 1 quality + 7 test jobs, and check the macOS
+   "Ensure Homebrew libcurl" step duration in `gh run view <id> --log` output.
+2. Full lane on demand: `gh workflow run main.yml -R genotrance/mcurl --ref devel -f full=true`,
+   then the same `gh run view` query; expect 30 test jobs (including
+   `test windows 3.15t` and `test linux x86_64 3.15t`).
+3. Schedule: after the first Saturday 03:00 UTC run,
+   `gh run list -R genotrance/mcurl -w CI -e schedule -L 1`.
+4. Release matrix: `gh workflow run build.yml -R genotrance/mcurl --ref devel -f dry_run=true`
+   and confirm every `Build <os> <arch>` job passed and the artifacts include
+   i686, musllinux, aarch64, macOS arm64, Windows and cp315t wheels.
+
+Record the measured totals here next to the baseline.
 
 ### Jobs
+
+**`plan`** (ubuntu-latest): selects the lane and outputs the matrices and the
+pytest marker arguments.
 
 **`quality`** (ubuntu-latest):
 - Checks out the repo
 - Runs `make check` (pre-commit hooks + mypy)
 
-**`tests`** (matrix):
-- OS: `{ubuntu-latest, ubuntu-24.04-arm, macos-15}`
-- Python: `{3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, pypy3.11}`
-- Linux x86_64 tests all Python versions (CPython 3.9–3.15 + PyPy 3.11).
-- Linux aarch64 tests a representative subset (3.9, 3.13, 3.14, 3.15, pypy3.11) on
-  native `ubuntu-24.04-arm` runners — no QEMU emulation.
+**`tests`** (matrix from `plan`):
 - macOS tests use `macos-15`, matching the macOS release-wheel runner and its
-  Homebrew libcurl version. Before setup, CI refreshes Homebrew curl so the
-  runner image's preinstalled version cannot lag behind the libcurl version in
-  `pyproject.toml`; it verifies the resulting version because an unrelated
-  Homebrew dependency-link warning can otherwise make a successful curl
-  upgrade exit nonzero.
+  Homebrew libcurl version, and run `tools/brew_curl.sh` before setup.
 - The macOS arm64 release wheel requires macOS 15 or later. Since 8.23.0.1 the
   wheel is built on `macos-15` and bundles Homebrew's curl dependency closure;
   current Homebrew bottles for curl and most of its dependencies target macOS
@@ -50,25 +129,22 @@ validated before it is promoted to `devel`.
   PyPy on Linux works correctly because the built-in cffi is preserved.
 - Builds the cffi extension and runs `pytest` with coverage
 
-**`tests-windows`** (matrix):
-- Tests multiple Python versions (`3.9, 3.12, 3.13, 3.14, 3.15`) via cibuildwheel.
-- Uses the same `pyproject.toml` `[tool.cibuildwheel.windows]` config as the
-  release build, providing confidence that Windows wheels are correct without
-  running the full build matrix on every CI push.
-- Overrides `test-skip` with an empty value so every interpreter in the matrix
-  runs the full suite, instead of the smoke-only policy the release build uses.
+**`tests-windows`** (matrix from `plan`):
+- Builds and tests via cibuildwheel with the same `pyproject.toml`
+  `[tool.cibuildwheel.windows]` config as the release build.
+- Overrides `test-skip` with an empty value and `test-command` with the lane's
+  selection instead of the wheel smoke selection.
 
-**`tests-i686`** (matrix):
-- Builds and tests 32-bit Linux wheels (`manylinux` i686) via cibuildwheel,
-  for the oldest and two newest CPython releases (3.9, 3.14, and 3.15).
+**`tests-i686`** (matrix from `plan`; named `test linux <arch> <python>`):
+- Builds and tests Linux wheels via cibuildwheel: 32-bit `manylinux` i686 in
+  both lanes, plus free-threaded cp315t on x86_64 in the full lane.
 - Added because `main.yml` otherwise never runs 32-bit, yet `build.yml` ships
   i686 wheels. The release build hit a 32-bit-only failure: the auth_retry
   burst tests start 200 threads, which can exhaust the address space at the
-  default 8 MB stack size. Running this job on every push catches such
-  problems before a release.
+  default 8 MB stack size.
 - Overrides the `pyproject.toml` cibuildwheel `test-command` and `test-skip` so
-  that it keeps running the full suite on all three interpreters. The default
-  there is the short wheel smoke selection; see `docs/testing.md`.
+  it always runs the full suite, including slow tests. The default there is
+  the short wheel smoke selection; see `docs/testing.md`.
 
 The composite action `.github/actions/setup-python-env`:
 - Sets `allow-prereleases: true` so that current CPython releases and PyPy can
@@ -100,8 +176,9 @@ The composite action `.github/actions/setup-python-env`:
   containers. A separate musl job in `main.yml` is not needed because
   jbb's bundled OpenSSL conflicts with the newer system OpenSSL in musl
   containers, breaking Python's `ssl` module.
-- Windows CI tests multiple Python versions (3.9, 3.12, 3.13, 3.14, 3.15) via
-  cibuildwheel and is fully built across all versions in `build.yml`. The CI
+- Windows CI tests cp315 in the fast lane and cp39, cp312–cp315 and cp315t in
+  the full lane via cibuildwheel, and is fully built across all versions in
+  `build.yml`. The CI
   job overrides `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS` to use `uv pip install`
   instead of `pip install` because pip is not available in cibuildwheel's
   build venv.
@@ -133,8 +210,9 @@ queued release re-checks the `main` SHA before it commits anything.
 2. **`build-sdist`** — builds the source distribution.
 3. **`build-wheels`** — cibuildwheel matrix across platforms/architectures.
    Linux aarch64 builds use native `ubuntu-24.04-arm` runners (no QEMU).
-   macOS refreshes Homebrew curl before compilation so its wheel uses the
-   release's declared libcurl version.
+   macOS runs `tools/brew_curl.sh` before compilation so its wheel uses the
+   release's declared libcurl version (upgrading curl only when needed and
+   failing on any mismatch).
 4. **`publish`** — first verifies that the resolved release version matches
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
@@ -169,7 +247,8 @@ Run this checklist before merging a release from `devel` into `main`. It
 combines the checks that protect the release build with an integration check
 against px, which consumes pymcurl in production.
 
-1. Confirm that CI is green on `devel`, including the 32-bit Linux job. The
+1. Confirm that CI is green on `devel`, including the 32-bit Linux job, and
+   that the latest full-lane run (weekly or dispatched with `full`) passed. The
    release build includes an i686 wheel, so the regular test matrix alone does
    not cover every shipped configuration.
 2. Build the release candidate locally with the Makefile, using the libcurl
@@ -301,8 +380,9 @@ lock keeps working on 3.9-3.15 without these ignore rules.
 
 ## Deployment flow
 
-1. Push to `devel` or `working` → CI runs (quality + test matrix)
-2. Optionally trigger `build.yml` manually on `devel` to verify wheel builds
+1. Push to `devel` or `working` → CI runs the fast lane (quality + fast matrix)
+2. Before a release, dispatch `main.yml` with `full` and `build.yml` with
+   `dry_run` on `devel` to run the full matrix and every release wheel
 3. If CI green → merge `devel` → `main`
 4. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release
 5. New libcurl releases need no manual step: `check-upstream.yml` commits the
