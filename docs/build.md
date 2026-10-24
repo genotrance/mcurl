@@ -166,6 +166,7 @@ pre-merge operator gate and the release workflow.
 `uv.lock` is tracked in git so source checkouts and CI install reviewed
 dependency versions. CI, `make install` and `uv run` steps use `--locked`, so a
 stale lock fails loudly. Dependabot (`.github/dependabot.yml`, `uv` ecosystem)
-opens grouped minor/patch upgrade PRs. To upgrade manually, run
-`uv lock --upgrade` (or `uv lock --upgrade-package <name>`), run the tests,
-and commit `uv.lock`. The `jbb>=0.1.6` requirement is unchanged everywhere.
+opens grouped minor/patch upgrade PRs, with ignore rules for packages whose
+newer releases dropped Python 3.9 (see [Dependabot](ci.md#dependabot)). To
+upgrade manually, run `uv lock --upgrade` (or `uv lock --upgrade-package
+<name>`), run the tests, and commit `uv.lock`. The `jbb>=0.1.6` requirement is unchanged everywhere.
