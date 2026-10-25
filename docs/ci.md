@@ -59,9 +59,9 @@ single run gives the full suite on every shipped wheel:
 
 | Coverage | Where | What it covers |
 |----------|-------|----------------|
-| Full suite (slow tests included) | Full lane above | The interpreters and platforms listed there. Not covered: aarch64 CPython 3.10-3.12, i686 CPython 3.10-3.13, Windows CPython 3.10 and 3.11, PyPy other than 3.11, free-threaded `cp315t` on macOS and aarch64 |
-| Wheel smoke selection | `build.yml` (release build and dry run) | Installed wheels of the oldest CPython, the newest CPython, free-threaded 3.15 and PyPy 3.11 on each platform that builds them, including musllinux and macOS |
-| Build only | `build.yml` | Every other wheel identifier; it is built, repaired and uploaded, but its test step is skipped |
+| Full suite (slow tests included) | Full lane above | The interpreters and platforms listed there. Not covered: aarch64 CPython 3.10-3.12, i686 CPython 3.10-3.13, Windows CPython 3.10 and 3.11, PyPy 3.12, PyPy 3.11 on i686, free-threaded `cp315t` on macOS and aarch64 |
+| Wheel smoke selection | `build.yml` (release build and dry run) | Installed wheels of the oldest CPython, the newest CPython and free-threaded 3.15 on each platform that builds them (including musllinux and macOS), and PyPy 3.11 on the glibc Linux platforms (x86_64, i686 and aarch64) |
+| Build only | `build.yml` | Every other wheel identifier, including PyPy 3.12 on Linux. Build-only wheels are built and repaired, but their test step is skipped; they are uploaded to PyPI only by a non-dry-run release build on `main`. A dry run builds and repairs them without uploading or tagging |
 
 The release gate relies on the combination: every supported OS,
 architecture and libc is built and smoke-tested by the dry run, and the
