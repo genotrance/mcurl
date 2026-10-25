@@ -82,12 +82,16 @@ This is the authoritative explanation; [docs/ci.md](ci.md) and
 through `test-command` in `pyproject.toml`, and `test-skip` limits it to the
 oldest supported CPython (3.9), the newest (3.15), the free-threaded 3.15 build
 (`cp315t`) and PyPy 3.11 (`pp311`), on each platform that builds those
-identifiers (PyPy wheels are Linux-only). All wheels are still built; the
-skipped identifiers are build-only, because the CPython wheel is a single abi3
-build and one smoke run per distinct build is enough to prove that libcurl
-bundles and loads. When the supported CPython window changes (a new release or
-an end of life), update `test-skip` so the oldest and newest CPython stay
-tested.
+identifiers. PyPy wheels are Linux-only and cover the glibc platforms (x86_64,
+i686 and aarch64); there are none for musllinux, macOS or Windows. The `pypy`
+enable group builds PyPy 3.11 and 3.12 (`pp312`) on those platforms, and the
+PyPy-EOL versions (3.9 and 3.10) are not enabled. PyPy 3.11 is therefore the
+only smoke-tested PyPy build, and PyPy 3.12 is build-only. All wheels are still
+built; the skipped identifiers are build-only, because the CPython wheel is a
+single abi3 build and one smoke run per distinct build is enough to prove that
+libcurl bundles and loads. When the supported CPython window changes (a new
+release or an end of life), update `test-skip` so the oldest and newest CPython
+stay tested.
 
 The CI jobs that call cibuildwheel only to test (`tests-windows`, `tests-i686`
 and `tests-musl` in `main.yml`) override both `test-command` and `test-skip`.
