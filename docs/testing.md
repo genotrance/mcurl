@@ -20,7 +20,9 @@ Tests are split across multiple files in `tests/`:
 | `test_auth_retry_burst.py` | Burst load on the same fake proxy: 10/50/200 threads through `MCurl.do()` (multi and easy interface) while the proxy rejects, recovers, is down or stalls, checking that exactly one authentication request reaches the proxy per interval, the probe slot is never left stuck, and `auth_retry=0` still latches. `AUTH_RETRY_ROUNDS=<n>` repeats every scenario n times. The burst client threads and the fake proxy's per-connection handler threads are started with 256 KiB stacks (see `_small_stacks()` in `test_auth_retry.py`), because 200 threads at the default 8 MB can exhaust a 32-bit address space. Burst sizes are the same on every platform, so 32-bit runs check the same behaviour as 64-bit |
 | `test_dead_connection.py` | Local fake-upstream tests for stalled bodies, slow transfers, CONNECT tunnels, keepalive socket settings, and bounded multi waits. Also guards the v8.23.0.1 regression where `do()` slept the full select cap with no sockets to wait on: unit checks that `_perform()` never sleeps without a libcurl timer and never waits for a handle another thread already finished, plus a stress test that runs rounds of concurrent CONNECTs through a fake proxy answering 407 then 200 on a kept-alive connection (multi-round proxy auth, as px does) and fails if any `do()` loop sleeps for `MULTI_SELECT_TIMEOUT`. `MULTI_ROUND_ROUNDS` and `MULTI_ROUND_WIDTH` tune its rounds and concurrency |
 | `test_smoke.py` | Wheel smoke selection (`smoke` marker): libcurl loads, TLS and HTTP(S) are present, the libcurl version matches `pyproject.toml`, real HTTP and HTTPS requests succeed through `Curl` and `MCurl`, `cacert.pem` ships in the package, an untrusted certificate is rejected as a verification failure, and an installed wheel contains a bundled libcurl (skipped when not running from an installed wheel; fails instead under cibuildwheel, with paths normalised via realpath and normcase), and, under `CIBUILDWHEEL`, `mcurl` and `_libcurl_cffi` are imported from site-packages rather than the checkout |
-| `test_selection.py` | Checks that the `slow`, `not slow` and `smoke` selections partition the suite as described below, by running `pytest --collect-only` in a subprocess |
+| `test_select.py` | `MCurl` multi-wait (`select`) behaviour, including the slow idle-timeout test |
+| `test_release_decision.py` | `tools/release_decision.py`, the target-version and release-needed logic used by `check-upstream.yml`; loaded by file path (see below) |
+| `test_selection.py` | Checks the marker selections by running `pytest --collect-only` in a subprocess: `slow` and `not slow` together make up the full suite, and `smoke` has no slow tests and is under a tenth of the full run. `smoke` overlaps `not slow`, so the selections are not a partition |
 
 The dead-connection tests use only loopback sockets. They verify that keepalive
 is enabled and configured on the actual libcurl socket, but cannot reproduce a
@@ -60,7 +62,7 @@ level `pytestmark`), `test_concurrent_burst_sends_one_probe` in
 silent-proxy and concurrent multi-round tests in `test_dead_connection.py`, and
 the idle-timeout test in `test_select.py`. They were chosen from measured
 durations (`pytest --durations`), not by guesswork: on a Linux x86_64 host the
-full suite took about 125 s, of which the burst file alone took about 70 s. With
+full suite took about 128 s, of which the burst file alone took about 70 s. With
 the marked tests deselected (26 of 282) the fast selection takes about 33 s. Fast unit checks that live in
 the same files (for example the `_perform()` no-sleep checks and the keepalive
 socket options test) and the one-second `set_timeout` test in `test_api.py`
@@ -73,20 +75,26 @@ Each fails if the installed wheel cannot load libcurl or perform a real
 request, and the packaging checks cover what auditwheel, delocate and delvewheel
 are expected to produce. The slow marker is never combined with smoke.
 
-The wheel smoke selection is run by cibuildwheel through `test-command` in
-`pyproject.toml`. `test-skip` limits it to the oldest supported CPython (3.9),
-the newest (3.15), the free-threaded 3.15 build (`cp315t`) and one PyPy build
-(`pp311`) on each platform where those identifiers exist. All wheels are still
-built, including the intermediate CPython versions and `pp312`; only their test
-step is skipped, because the CPython wheel is a single abi3 build. When the
-supported CPython window changes (a new release, or an end of life), update the
-`test-skip` list so the oldest and newest CPython stay tested.
+#### Wheel smoke selection and test-skip
 
-The CI jobs that call cibuildwheel only to test (`tests-windows` and
-`tests-i686` and `tests-musl` in `main.yml`) override both `test-command` and `test-skip`. `tests-i686` always runs the
-full suite, including the 200-thread burst tests that exist to catch 32-bit
-address space exhaustion; `tests-windows` runs the fast selection on pushes
-and the full suite in the weekly full lane (see `docs/ci.md`).
+This is the authoritative explanation; [docs/ci.md](ci.md) and
+[docs/build.md](build.md) link here. The smoke selection is run by cibuildwheel
+through `test-command` in `pyproject.toml`, and `test-skip` limits it to the
+oldest supported CPython (3.9), the newest (3.15), the free-threaded 3.15 build
+(`cp315t`) and PyPy 3.11 (`pp311`), on each platform that builds those
+identifiers (PyPy wheels are Linux-only). All wheels are still built; the
+skipped identifiers are build-only, because the CPython wheel is a single abi3
+build and one smoke run per distinct build is enough to prove that libcurl
+bundles and loads. When the supported CPython window changes (a new release or
+an end of life), update `test-skip` so the oldest and newest CPython stay
+tested.
+
+The CI jobs that call cibuildwheel only to test (`tests-windows`, `tests-i686`
+and `tests-musl` in `main.yml`) override both `test-command` and `test-skip`.
+`tests-i686` always runs the full suite, including the 200-thread burst tests,
+because the slow burst tests are what exposed 32-bit address-space exhaustion
+in the first 8.23.0.1 attempt; `tests-windows` runs the fast selection on
+pushes and the full suite in the weekly full lane (see [docs/ci.md](ci.md)).
 
 The cibuildwheel test commands pass `-rs` so skips show in the logs and
 `--import-mode=importlib` so pytest does not put the checkout on `sys.path`;
@@ -113,30 +121,31 @@ was found by the slow burst tests.
 run the full lane: the complete suite, including slow tests, across the
 interpreter and platform matrix in `docs/ci.md`, plus musllinux.
 
-**The matrix is split because the project is small and macOS runners are
-expensive.** GitHub macOS runners are the costliest and have few parallel
-slots. Before the split, each push ran 29 jobs, seven of them macOS, and took
+**The matrix is split because the project is small and GitHub macOS runners
+are slow, expensive and allow little concurrency.** A small project does not
+need every interpreter on every push, and each macOS job queues behind few
+parallel slots and spends most of its time in the Homebrew update step. Before the split, each push ran 29 jobs, seven of them macOS, and took
 about 15 minutes; much of each macOS job went to the Homebrew update step. The
 fast lane keeps one job per platform-specific path and moves the rest to the
 weekly lane. Locally the fast selection took about 33 s against about 128 s
-for the full suite on Linux x86_64 with CPython 3.15.
+for the full suite on Linux x86_64 with CPython 3.15 (the same measurement as
+above).
 
 **abi3 wheels need only the oldest and newest CPython.** The release wheels
 are one `cp39-abi3` build, so the same binary serves every CPython from 3.9
 up. The wheel smoke selection therefore runs only on the oldest CPython (3.9)
 and the newest (3.15), which bracket the supported range. Free-threaded
 `cp315t` and PyPy `pp311` are separate builds with their own code paths, so
-each gets one smoke run per platform. The other CPython and PyPy wheels are
-still built and only skip their test step (see `test-skip` in
-`pyproject.toml`).
+each gets one smoke run per platform that builds it. The other wheels are
+build-only (see [Wheel smoke selection and test-skip](#wheel-smoke-selection-and-test-skip)).
 
-**Before a release, every supported Python, OS and architecture is covered.**
-The weekly or `full=true` run covers the full suite on every interpreter and
-platform in the full lane. The release dry run in `build.yml` builds and
-smoke-tests every wheel on every platform. Together they reach every
-combination the project ships; the combinations that only the dry run covers
-get the smoke selection, not the full suite. The dry run and the full run are
-the release gate, not the push lane.
+**Before a release, every supported OS, architecture and libc is tested.**
+The weekly or `full=true` run covers the full suite on the interpreters and
+platforms in the full lane. The `build.yml` dry run builds every wheel and
+smoke-tests only the subset above, so some wheels are build-only. Not every
+Python, OS and architecture combination runs the full suite; the exact tested
+versus build-only table is in [docs/ci.md](ci.md). Both runs, on the exact
+candidate SHA, are the release gate, not the push lane.
 
 **Targeted Homebrew curl check (macOS).** The macOS wheel is built from
 Homebrew's curl, and the sdist build needs Homebrew curl at the libcurl base
@@ -197,7 +206,7 @@ uv run python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
 uv run -p 3.15 python -m pytest tests -q
 ```
 
-The weekly full CI lane runs the full suite on CPython 3.9 through 3.15. Run the command above
+The weekly full CI lane runs the full suite on CPython 3.9 through 3.15 on Linux x86_64 and macOS. Run the command above
 before adding support for a newly released CPython version so the local build,
 cffi extension, and test dependencies are exercised together.
 
