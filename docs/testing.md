@@ -49,7 +49,7 @@ so the full suite always includes every test.
 
 | Selection | Command | Purpose |
 |-----------|---------|---------|
-| Full | `uv run python -m pytest tests -q` (or `make test` for coverage) | Everything, including slow tests. This is what the weekly full CI lane, the i686 CI job and release validation run |
+| Full | `uv run python -m pytest tests -q` (or `make test` for coverage) | Everything, including slow tests. This is what the weekly and `full=true` CI lanes run, and what the `tests-i686` and `tests-musl` jobs run |
 | Fast | `uv run python -m pytest tests -m "not slow" -q` (or `make test-fast`) | Local iteration and the push/PR fast CI lane; everything except the slow tests |
 | Wheel smoke | `uv run python -m pytest tests -m smoke -q` (or `make test-smoke`) | Short check of an installed wheel; what cibuildwheel runs |
 
@@ -93,6 +93,80 @@ The cibuildwheel test commands pass `-rs` so skips show in the logs and
 otherwise the tests would import `mcurl` from the source tree rather than the
 installed wheel. `tests/test_release_decision.py` therefore loads
 `tools/release_decision.py` by file path.
+
+### Contributor testing strategy
+
+Routine CI and release coverage differ on purpose. This section explains the
+intent; the job lists, workflow triggers and release checklist are in
+[docs/ci.md](ci.md).
+
+**Every push and pull request** runs the fast lane: lint and type checks, then
+the `not slow` selection on a small set of jobs. Each job covers a code path
+that differs by platform or interpreter: Linux x86_64 CPython 3.9 and 3.15,
+PyPy 3.11, Linux aarch64 CPython 3.15, macOS 15 arm64 CPython 3.15 (Homebrew
+libcurl and the dynamic-library path), Windows AMD64 cp315 (cibuildwheel and
+delvewheel repair), and the i686 job. The i686 job is the exception: it runs
+the full suite, including slow tests, because the 32-bit address-space limit
+was found by the slow burst tests.
+
+**The weekly run** (Saturday 03:00 UTC) and a manual dispatch with `full=true`
+run the full lane: the complete suite, including slow tests, across the
+interpreter and platform matrix in `docs/ci.md`, plus musllinux.
+
+**The matrix is split because the project is small and macOS runners are
+expensive.** GitHub macOS runners are the costliest and have few parallel
+slots. Before the split, each push ran 29 jobs, seven of them macOS, and took
+about 15 minutes; much of each macOS job went to the Homebrew update step. The
+fast lane keeps one job per platform-specific path and moves the rest to the
+weekly lane. Locally the fast selection took about 33 s against about 128 s
+for the full suite on Linux x86_64 with CPython 3.15.
+
+**abi3 wheels need only the oldest and newest CPython.** The release wheels
+are one `cp39-abi3` build, so the same binary serves every CPython from 3.9
+up. The wheel smoke selection therefore runs only on the oldest CPython (3.9)
+and the newest (3.15), which bracket the supported range. Free-threaded
+`cp315t` and PyPy `pp311` are separate builds with their own code paths, so
+each gets one smoke run per platform. The other CPython and PyPy wheels are
+still built and only skip their test step (see `test-skip` in
+`pyproject.toml`).
+
+**Before a release, every supported Python, OS and architecture is covered.**
+The weekly or `full=true` run covers the full suite on every interpreter and
+platform in the full lane. The release dry run in `build.yml` builds and
+smoke-tests every wheel on every platform. Together they reach every
+combination the project ships; the combinations that only the dry run covers
+get the smoke selection, not the full suite. The dry run and the full run are
+the release gate, not the push lane.
+
+**Targeted Homebrew curl check (macOS).** The macOS wheel is built from
+Homebrew's curl, and the sdist build needs Homebrew curl at the libcurl base
+version in `pyproject.toml`. `tools/brew_curl.sh` checks the installed curl
+against that version, upgrades only on a mismatch, and fails the job if the
+final version is wrong. Contributors building from source on macOS can run it
+(it changes the local Homebrew curl) so the local libcurl matches what CI builds
+against. Release mode in `build.yml` also refreshes curl's dependencies because
+the wheel bundles them.
+
+**Testing px against the exact candidate.** mcurl's own suite does not catch
+everything a consumer depends on. px's HTTPS proxy-auth tests caught a
+regression in 8.23.0.1 that mcurl's suite did not. Before merging `devel`
+into `main`, build the exact candidate SHA, install it into px's working
+branch, and run px's full suite as the release checklist in `docs/ci.md`
+describes. Ordinary pull requests do not need this run, but a change to proxy
+authentication, auth retry, or timeouts should be called out in the PR so the
+release operator runs it.
+
+### Local reproduction
+
+| CI selection | Local command |
+|--------------|---------------|
+| Fast push/PR lane | `make test-fast` (run `eval $(make env)` first on Linux so the test-time `LD_LIBRARY_PATH` points at the jbb libcurl) |
+| Full lane | `make test`, or `uv run python -m pytest tests -q` |
+| Wheel smoke (on an installed wheel) | Build with `uv build`, install the wheel into a fresh virtual environment with `pytest` and `pytest-httpbin`, then run `python -m pytest <checkout>/tests -m smoke -q -rs --import-mode=importlib` from a directory outside the checkout |
+
+`make test-smoke` runs the smoke selection against the editable development
+environment. It does not test an installed wheel, which is what cibuildwheel
+checks, so use the wheel command above to reproduce the release test.
 
 ### Manual run
 
