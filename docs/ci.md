@@ -23,8 +23,8 @@ definitions.
 ### Lanes
 
 **Fast lane** — every push to `main`/`devel`/`working` and every pull request
-(and a manual dispatch without `full`). Tests run with `-m "not slow"` except
-where noted:
+(and a manual dispatch without `full`). Tests run with `-m "not slow"` (see
+`docs/testing.md` for marker definitions) except where noted:
 
 | Job | Configuration | Why it is in the fast lane |
 |-----|---------------|----------------------------|
@@ -54,11 +54,19 @@ so slow tests run everywhere:
   jobs are the only place the full suite runs on musl. They are not in the
   fast lane.
 
-The remaining architecture/interpreter wheel combinations are only built (and
-smoke-tested) by `build.yml` (see below), whose dry run is part of the
+The remaining architecture/interpreter wheel combinations (PyPy on aarch64,
+Windows, and musl; cp314t everywhere; musllinux i686) are only built and
+smoke-tested by `build.yml` (see below), whose dry run is part of the
 pre-release gate.
-The full lane keeps every exclusion the previous single matrix had: no PyPy on
-macOS or Windows, no `cp314t`, no musllinux i686.
+
+**Coverage guarantee before release**: The full lane combined with the
+`build.yml` dry run ensures that every supported Python version (3.9–3.15,
+PyPy, cp315t), every OS (Linux, macOS, Windows), every architecture
+(x86_64, i686, aarch64, arm64), and every libc variant (glibc, musl) receives
+at least one full test run including slow tests before a release. The i686,
+musllinux, and aarch64 full-lane jobs are the only places slow tests run on
+those platforms, and the weekly full lane running from the default branch
+means the release gate is independent of push-lane timing.
 
 Job totals: the fast lane runs 9 jobs (`plan`, `quality` and 7 test jobs); the
 full lane runs 34 (`plan`, `quality` and 32 test jobs: 20 `tests`, 6
@@ -66,20 +74,31 @@ full lane runs 34 (`plan`, `quality` and 32 test jobs: 20 `tests`, 6
 
 ### Rationale and baseline
 
-Baseline (before the split): devel CI run 40019820063 (2026-10-23) ran 29 jobs
-for every push and took 15 min 15 s from creation to completion. Linux jobs
-took 2–3 min, Windows and i686 cibuildwheel jobs 3–4 min, and each of the
-seven macOS jobs 5–6 min, of which 61–124 s was the Homebrew
-`brew update`/`brew upgrade curl` step (earlier runs such as 39668753800
-spent 15–20 min there). macOS runners are the most expensive, so seven macOS
-jobs per push dominated cost. The fast selection (`-m "not slow"`) measured
-32.9 s against 127.6 s for the full suite locally on Linux x86_64 3.15
-(`docs/testing.md`).
+GitHub's macOS runners are significantly more expensive and slower than Linux
+or Windows runners, with restricted parallelism: each macOS job takes 5–6 min
+compared to 2–3 min on Linux, and earlier CI runs spent 15–20 min in
+Homebrew's git-fetch and formula update step alone.
 
-The fast lane cuts routine CI from 29 jobs to 9 (7 test jobs against 28 before, with one macOS job), while each
-platform- or architecture-specific code path still runs on every push. The
-weekly full lane and the `build.yml` dry run before a release retain complete
-interpreter, OS, architecture and slow-test coverage.
+Before the split, devel CI run 40019820063 (2026-10-23) ran 29 jobs for every
+push (seven macOS jobs among them) and took 15 min 15 s total. Running a
+separate MacOS job per Python version (3.9–3.15) on every push was wasteful:
+each Python version duplicates the same library-bundling and test-framework
+code paths, yet a single macOS job per push exercises the entire Homebrew
+libcurl build chain and the same OS-specific linker rpath setup used in the
+release wheel.
+
+The fast lane reduces routine CI from 29 jobs to 9 (7 test jobs, one per
+platform/architecture and Python configuration that exercises a distinct code
+path, including one macOS job), while `main.yml` and `build.yml` still test all
+supported Python versions and confirm that slow tests pass on a full matrix
+before every release. The weekly full lane (34 jobs) and the `build.yml` dry
+run before a release give complete coverage: all CPython 3.9–3.15, PyPy,
+free-threaded builds, all tested architectures (x86_64, i686, aarch64, arm64),
+all OSes (Linux, macOS, Windows), all libc variants (glibc, musl), and the slow
+tests that time-bound MCurl multi-handle concurrency and auth-retry recovery.
+This separation ensures every platform- and architecture-specific code path
+runs on every push, while full coverage is verified before release rather than
+spent on every commit.
 
 ### Homebrew curl on macOS
 
@@ -162,18 +181,51 @@ pytest marker arguments.
   both lanes, plus free-threaded cp315t on x86_64 in the full lane.
 - Added because `main.yml` otherwise never runs 32-bit, yet `build.yml` ships
   i686 wheels. The release build hit a 32-bit-only failure: the auth_retry
-  burst tests start 200 threads, which can exhaust the address space at the
-  default 8 MB stack size.
+  burst tests exhaust the 32-bit address space at the default stack size
+  (see the burst-test notes in `docs/testing.md`).
 - Overrides the `pyproject.toml` cibuildwheel `test-command` and `test-skip` so
-  it always runs the full suite, including slow tests. The default there is
-  the short wheel smoke selection; see `docs/testing.md`.
+  it always runs the full test suite, bypassing the `smoke` marker filter. The
+  default `pyproject.toml` configuration runs only the short wheel smoke
+  selection to save time in `build.yml` (see `docs/testing.md` for marker
+  definitions).
 
 **`tests-musl`** (full lane only; named `test musllinux <arch> <python>`):
 - Builds and tests cp315 musllinux wheels via cibuildwheel on x86_64
   (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`), following the i686 job
-  pattern: empty `test-skip` and the full suite including slow tests.
-- Added because the release build now only smoke-tests wheels, which left the
-  full suite running nowhere on musl.
+  pattern: runs the full test suite, not the `smoke` selection.
+- Added because the release build (`build.yml`) only smoke-tests wheels for
+  time; the full suite on musl now runs only in the full lane, ensuring
+  complete test coverage before release (see `docs/testing.md` for test
+  markers).
+
+### Wheel smoke selection rationale
+
+`build.yml` tests each wheel with the `smoke` marker selection (see
+`docs/testing.md`) on a subset of configurations to save time: the oldest
+supported CPython (3.9), the newest (3.15), free-threaded 3.15, and one PyPy
+build per platform. This subset is sufficient because:
+
+- All release wheels (abi3 and free-threaded) are built on every push, so
+  `build.yml`'s role is to verify that each platform's shared libraries bundle
+  and load correctly, not to test every Python version.
+- The `cp39-abi3` wheel is compatible with any CPython ≥ 3.9, so testing it on
+  3.9 and 3.15 validates both the oldest and newest supported versions; the
+  intermediate versions are built but skipped (see `test-skip` in
+  `pyproject.toml`).
+- Free-threaded testing happens on one version (cp315t) because it uses a
+  different ABI from stable; an isolated build of that wheel on a single
+  platform verifies the threading-specific linker configuration.
+- PyPy uses its own ABI, so one platform per configuration (e.g. pp311 on
+  Linux) verifies that the PyPy wheel built for that platform links
+  correctly.
+
+The full CI lane tests all Python versions (`3.9–3.15` CPython, PyPy, cp315t,
+and the full test suite including slow tests) on every platform before release.
+`main.yml`'s fast lane spot-checks one macOS, one Windows, and one
+architecture per wheel type to prevent regressions while keeping push CI under
+control.
+
+### Test command and import mode
 
 All cibuildwheel test commands report skips (`-rs`) and use pytest's
 `importlib` import mode. In the default prepend mode `tests/__init__.py` puts
@@ -296,42 +348,49 @@ against px, which consumes pymcurl in production.
 
 1. Pick the exact release-candidate SHA (`git rev-parse devel`) and require
    both gates below to pass on that SHA. Release wheels are only
-   smoke-tested, so these runs are the real gate, and the fast push lane is
-   not a substitute.
-   - Full lane (every interpreter and platform, slow tests, i686 and
-     musllinux):
+   smoke-tested, so these runs are the real test coverage, and the fast push
+   lane is not a substitute.
+   - **Full lane**: run the complete test matrix with slow tests enabled (all
+     CPython 3.9–3.15, PyPy, free-threaded, all platforms and architectures,
+     including i686 and musllinux):
      `gh workflow run main.yml -R genotrance/mcurl --ref devel -f full=true`,
      then find it with `gh run list -R genotrance/mcurl -w CI -b devel -e workflow_dispatch -L 1`
      and confirm with `gh run view <id> -R genotrance/mcurl --json headSha,conclusion`
      that `headSha` equals the candidate and every job passed. A weekly
      scheduled run only counts if its `headSha` is the candidate.
-   - Release dry run (wheel build, repair and smoke tests on every platform):
+   - **Release dry run**: build every platform/architecture wheel, verify
+     repair, and smoke-test (oldest and newest CPython, free-threaded 3.15,
+     PyPy per platform):
      `gh workflow run build.yml -R genotrance/mcurl --ref devel -f dry_run=true -f sha=<candidate>`,
      then `gh run list -R genotrance/mcurl -w "Build wheels" -L 1` and
      `gh run view <id> -R genotrance/mcurl` to confirm all `Build <os> <arch>`
      jobs and the sdist passed. A `devel` dry run skips the `publish` job; see
      the build workflow notes above.
-2. Build the release candidate locally with the Makefile, using the libcurl
-   base version declared in `pyproject.toml`, and run mcurl's full test suite
-   against that candidate.
-3. Install the candidate into px's current working branch and run px's full
-   suite at least twice with `PX_EVENT_LOOP` unset and at least twice with it
-   set to `asyncio`. Run these tests from a directory outside the developer's
-   home directory: a `~/.env` containing `PX_` variables can alter px's
-   authentication-chain tests. Repeat the same runs with the previous pymcurl
-   release for comparison. Any failure that is new with the candidate blocks
-   the release. This check would have caught the HTTPS proxy-auth regression
-   shipped in 8.23.0.1, which was released after step 3 was skipped.
+2. Build the release candidate locally with the Makefile (using the exact
+   libcurl base version from `pyproject.toml`) and run mcurl's full test suite
+   against that candidate. Ensure that the mcurl version built matches
+   `pyproject.toml` exactly.
+3. **Install into px and run px's full test suite at least twice on both
+   `PX_EVENT_LOOP=unset` and `PX_EVENT_LOOP=asyncio`** against the candidate
+   and the previous pymcurl release for comparison. Run tests from outside
+   the developer's home directory to avoid `~/.env` interference with px's
+   authentication-chain tests. Any new failure blocks the release. The
+   HTTPS proxy-auth regression shipped in 8.23.0.1 was caught in px testing
+   post-release; this step is the gate that would have prevented it.
 4. Download the dry-run artifacts
    (`gh run download <id> -R genotrance/mcurl -D dry-run`) and compare the
-   wheel platform tags with the previous release's files on PyPI. A runner change moved the macOS wheel
-   from `macosx_14_0` to `macosx_15_0` in 8.23.0.1; tag changes must be
-   understood before release.
-5. Confirm that the macOS job of the dry run passed its Homebrew step:
-   curl equals the libcurl base version in `pyproject.toml` (the exact-version
-   assertion) and release mode refreshed curl's dependencies. The macOS wheel
-   is built from Homebrew, so a mismatch can produce a wheel for a different
-   libcurl than the declared release.
+   wheel platform tags with the previous release on PyPI. Verify that `i686`,
+   `aarch64`, `arm64`, `x86_64`, `musl*` wheels are present for each
+   architecture. Runner or libcurl version changes can shift platform tags
+   (e.g., the macOS arm64 runner moved to `macos-15` in 8.23.0.1, changing
+   the tag from `macosx_14_0_arm64` to `macosx_15_0_arm64`); unexpected tag
+   changes must be understood before release.
+5. Confirm that the macOS dry-run job's Homebrew step passed: the installed
+   curl version equals the libcurl base version in `pyproject.toml` (confirmed
+   by the step's final assertion), and release mode (`--release` flag) refreshed
+   curl's dependencies. The macOS arm64 wheel bundles Homebrew's curl and its
+   dependency closure, so a mismatch in the Homebrew curl version can produce a
+   wheel for a different libcurl than the declared release version.
 6. Merge `devel` into `main` with the commit message
    `Merge devel for libcurl <version> release`. The push runs `build.yml`,
    which builds and publishes the distributions and then creates the
