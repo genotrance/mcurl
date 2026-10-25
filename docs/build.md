@@ -107,10 +107,11 @@ Several configurations are skipped because they are unsupported or broken:
   compatible with PyPy on Windows.
 
 Every wheel is still built, but `test-command` runs only the `smoke` selection
-(see `docs/testing.md`) and `test-skip` restricts it to the oldest and newest
-CPython, free-threaded CPython 3.15 and one PyPy build, since the CPython wheel
-is one abi3 build. Running the full suite on every identifier repeated the same
-work for each wheel and dominated the release build time.
+on a subset of identifiers; the others are build-only. The rationale, and why
+i686 CI runs the full suite instead, are in
+[docs/testing.md](testing.md#wheel-smoke-selection-and-test-skip). Running the
+full suite on every identifier repeated the same work for each wheel and
+dominated the release build time.
 
 `jsonschema<4.18` is pinned in the Linux-specific `test-requires` to prevent
 `rpds-py` (a Rust package with no PyPy wheel) from being pulled in via the
