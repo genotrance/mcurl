@@ -288,17 +288,7 @@ def xferinfo_callback(clientp, dltotal, dlnow, ultotal, ulnow):
 @ffi.def_extern()
 def seek_callback(clientp, offset, origin):
     curl = MCURL.handles[cvp2pystr(clientp)]
-    if curl._seek_fn is not None:
-        return curl._seek_fn(offset, origin)
-    # Default: seek on client_rfile if it supports seeking
-    if curl.client_rfile is not None and hasattr(curl.client_rfile, "seek"):
-        try:
-            curl.client_rfile.seek(offset, origin)
-        except (OSError, ValueError):
-            return libcurl.CURL_SEEKFUNC_FAIL
-        else:
-            return libcurl.CURL_SEEKFUNC_OK
-    return libcurl.CURL_SEEKFUNC_CANTSEEK
+    return curl._seek(offset, origin)
 
 
 class Curl:
@@ -309,6 +299,9 @@ class Curl:
     easyhash = None
     ceasyhash = ffi.NULL
     sock_fd = None
+
+    # Declared request body length, kept so the body can be resent after a rewind
+    _content_length = None
 
     # For plain HTTP
     client_rfile = None
@@ -503,6 +496,7 @@ class Curl:
         self.auth = None
         self.proxy = None
         self.size = None
+        self._content_length = None
         self.user = None
         self.xheaders = None
         self._keepalive = []
@@ -593,6 +587,22 @@ class Curl:
                 # Proxy + auth so tunnel and authenticate
                 self.set_tunnel()
 
+    def _seek(self, offset, origin):
+        "Seek the request body source; a rewind to the start restores the read budget"
+        if self._seek_fn is not None:
+            ret = self._seek_fn(offset, origin)
+        elif self.client_rfile is not None and hasattr(self.client_rfile, "seek"):
+            try:
+                self.client_rfile.seek(offset, origin)
+            except (OSError, ValueError):
+                return libcurl.CURL_SEEKFUNC_FAIL
+            ret = libcurl.CURL_SEEKFUNC_OK
+        else:
+            return libcurl.CURL_SEEKFUNC_CANTSEEK
+        if ret == libcurl.CURL_SEEKFUNC_OK and offset == 0 and origin == 0 and self._content_length is not None:
+            self.size = self._content_length
+        return ret
+
     def set_headers(self, xheaders):
         "Set request headers from a dict of {name: value} pairs"
         self.headers = ffi.NULL
@@ -610,6 +620,7 @@ class Curl:
                     # Save content-length for PUT/POST later
                     # Turn off Transfer-Encoding since size is known
                     self.size = size
+                    self._content_length = size
                     self.headers = libcurl.curl_slist_append(self.headers, py2cstr("Transfer-Encoding:"))
                     self.headers = libcurl.curl_slist_append(self.headers, py2cstr("Expect:"))
                     if self.is_post:
@@ -1007,6 +1018,7 @@ class Curl:
         new.client_wfile = None
         new.client_hfile = None
         new.size = None
+        new._content_length = None
         new.cerr = libcurl.CURLE_OK
         new.done = False
         new.errstr = ""
@@ -1692,6 +1704,11 @@ class MCurl:
                             # falls back to NTLM by itself, so proxyauth_used is
                             # never left at NEGOTIATE there and this never matches.
                             retry_without_negotiate = True
+                            if curl._content_length and curl._seek(0, 0) != libcurl.CURL_SEEKFUNC_OK:
+                                # Body cannot be resent: inconclusive, not an auth failure
+                                retry_without_negotiate = False
+                                curl.resp = 503
+                                curl.errstr += "Request body cannot be resent for NTLM retry; "
                         else:
                             # Proxy auth did not work for whatever reason
                             out = "Proxy authentication failed: "
