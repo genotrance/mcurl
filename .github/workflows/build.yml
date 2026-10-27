@@ -191,7 +191,7 @@ jobs:
 
   publish:
     needs: [setup, build-sdist, build-wheels, px-scenarios]
-    if: always() && needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main' && needs.px-scenarios.result == 'success'
+    if: needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main' && needs.px-scenarios.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
