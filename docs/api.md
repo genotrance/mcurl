@@ -244,6 +244,15 @@ proxy CONNECT failures, count as authentication failures. Stopped or
 callback-aborted probes, zero response codes, and non-407 CONNECT failures
 are inconclusive and do not count.
 
+With auth `ANY` on Linux/macOS, a proxy offering both Negotiate and NTLM
+makes libcurl pick Negotiate; without a Kerberos ticket, GSS-API fails to
+produce a token and libcurl surfaces the proxy's original 407 without ever
+trying NTLM. `do()` detects this case (`get_proxyauth_used()` returns
+`CURLAUTH_NEGOTIATE` on a final 407) and retries the request once with
+Negotiate removed from the auth mask, so the retry uses NTLM; only a failure
+of that retry counts towards the threshold. Windows SSPI already falls back
+to NTLM internally, so this never triggers there.
+
 ### Static methods
 
 | Method | Description |

@@ -350,6 +350,7 @@ class Curl:
     # Proxy for which this handle holds the auth retry probe slot
     _probe_proxy = None
     _stopped = False
+    _negotiate_retried = False
 
     @staticmethod
     def strerror(code):
@@ -510,6 +511,7 @@ class Curl:
 
         self.cerr = libcurl.CURLE_OK
         self._stopped = False
+        self._negotiate_retried = False
         self.done = False
         self.errstr = ""
         self.resp = 503
@@ -1588,116 +1590,154 @@ class MCurl:
 
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
-        if not curl.is_easy:
-            self.add(curl)
-            while True:
-                if curl.done:
-                    break
-                self._perform(curl)
-                time.sleep(0.01)
-            curl._save_auth()
-        else:
-            dprint(curl.easyhash + ": Using easy interface")
-            curl.perform()
+        while True:
+            if not curl.is_easy:
+                self.add(curl)
+                while True:
+                    if curl.done:
+                        break
+                    self._perform(curl)
+                    time.sleep(0.01)
+                curl._save_auth()
+            else:
+                dprint(curl.easyhash + ": Using easy interface")
+                curl.perform()
 
-        # Map some libcurl error codes to HTTP errors
-        if curl.cerr == libcurl.CURLE_URL_MALFORMAT:
-            # Bad request
-            curl.resp = 400
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [libcurl.CURLE_UNSUPPORTED_PROTOCOL, libcurl.CURLE_NOT_BUILT_IN]:
-            # Not implemented
-            curl.resp = 501
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [
-            libcurl.CURLE_COULDNT_RESOLVE_PROXY,
-            libcurl.CURLE_COULDNT_RESOLVE_HOST,
-            libcurl.CURLE_COULDNT_CONNECT,
-        ]:
-            # Bad gateway
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_OPERATION_TIMEDOUT:
-            # Gateway timeout
-            curl.resp = 504
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
-            # POST/PUT rewind not supported (#199) - retry
-            curl.resp = 503
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [
-            libcurl.CURLE_SSL_CONNECT_ERROR,
-            libcurl.CURLE_PEER_FAILED_VERIFICATION,
-            libcurl.CURLE_SSL_CERTPROBLEM,
-            libcurl.CURLE_SSL_CACERT_BADFILE,
-        ]:
-            # SSL/TLS error
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [libcurl.CURLE_SEND_ERROR, libcurl.CURLE_RECV_ERROR, libcurl.CURLE_GOT_NOTHING]:
-            # Network error
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
-            # Auth function error (SSPI/GSS-API failure)
-            curl.resp = 407
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_HTTP2:
-            # HTTP/2 framing error
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr != libcurl.CURLE_OK:
-            # Unmapped libcurl error
-            curl.resp = 503
-            curl.errstr += f"Curl error {curl.cerr}"
+            # Map some libcurl error codes to HTTP errors
+            if curl.cerr == libcurl.CURLE_URL_MALFORMAT:
+                # Bad request
+                curl.resp = 400
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [libcurl.CURLE_UNSUPPORTED_PROTOCOL, libcurl.CURLE_NOT_BUILT_IN]:
+                # Not implemented
+                curl.resp = 501
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [
+                libcurl.CURLE_COULDNT_RESOLVE_PROXY,
+                libcurl.CURLE_COULDNT_RESOLVE_HOST,
+                libcurl.CURLE_COULDNT_CONNECT,
+            ]:
+                # Bad gateway
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_OPERATION_TIMEDOUT:
+                # Gateway timeout
+                curl.resp = 504
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
+                # POST/PUT rewind not supported (#199) - retry
+                curl.resp = 503
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [
+                libcurl.CURLE_SSL_CONNECT_ERROR,
+                libcurl.CURLE_PEER_FAILED_VERIFICATION,
+                libcurl.CURLE_SSL_CERTPROBLEM,
+                libcurl.CURLE_SSL_CACERT_BADFILE,
+            ]:
+                # SSL/TLS error
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [libcurl.CURLE_SEND_ERROR, libcurl.CURLE_RECV_ERROR, libcurl.CURLE_GOT_NOTHING]:
+                # Network error
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
+                # Auth function error (SSPI/GSS-API failure)
+                curl.resp = 407
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_HTTP2:
+                # HTTP/2 framing error
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr != libcurl.CURLE_OK:
+                # Unmapped libcurl error
+                curl.resp = 503
+                curl.errstr += f"Curl error {curl.cerr}"
 
-        # A transfer without a real response is inconclusive. In particular,
-        # stop() leaves CURLE_OK and a zero response code, so it must not clear
-        # a blocked proxy. A CONNECT 407 is the exception: libcurl reports it
-        # as CURLE_COULDNT_CONNECT, but the proxy's auth response is reliable.
-        # Any other error, or a failed (re)connect, interrupted the handshake
-        # and leaves the 407 of an intermediate leg in HTTP_CONNECTCODE (px#268).
-        auth_failed = None
-        if curl.proxy is not None:
-            aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
-            ret, codep = curl.get_response()
-            if curl.cerr != libcurl.CURLE_OK:
-                ret, codep = curl.get_connect_response()
-                if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or TUNNEL_407 not in curl.get_errorbuffer():
-                    # CURLINFO_OS_ERRNO and HTTP_CONNECTCODE persist across the
-                    # legs of a transfer so libcurl's last error message decides
-                    aborted = True
-            if not aborted and ret == libcurl.CURLE_OK and codep == 407:
-                # Proxy authentication required
-                if curl.suppress:
-                    # 407 header block never completed - connection cut mid-headers
-                    dprint(curl.easyhash + ": Truncated 407 response")
-                    curl.resp = 502
-                    curl.errstr += "Truncated proxy response; "
-                elif curl.auth is not None:
-                    # Proxy auth did not work for whatever reason
-                    out = "Proxy authentication failed: "
-                    if curl.user is not None:
-                        out += "check user/password or try different auth method"
+            # A transfer without a real response is inconclusive. In particular,
+            # stop() leaves CURLE_OK and a zero response code, so it must not clear
+            # a blocked proxy. A CONNECT 407 is the exception: libcurl reports it
+            # as CURLE_COULDNT_CONNECT, but the proxy's auth response is reliable.
+            # Any other error, or a failed (re)connect, interrupted the handshake
+            # and leaves the 407 of an intermediate leg in HTTP_CONNECTCODE (px#268).
+            auth_failed = None
+            retry_without_negotiate = False
+            if curl.proxy is not None:
+                aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
+                ret, codep = curl.get_response()
+                if curl.cerr != libcurl.CURLE_OK:
+                    ret, codep = curl.get_connect_response()
+                    if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or TUNNEL_407 not in curl.get_errorbuffer():
+                        # CURLINFO_OS_ERRNO and HTTP_CONNECTCODE persist across the
+                        # legs of a transfer so libcurl's last error message decides
+                        aborted = True
+                if not aborted and ret == libcurl.CURLE_OK and codep == 407:
+                    # Proxy authentication required
+                    if curl.suppress:
+                        # 407 header block never completed - connection cut mid-headers
+                        dprint(curl.easyhash + ": Truncated 407 response")
+                        curl.resp = 502
+                        curl.errstr += "Truncated proxy response; "
+                    elif curl.auth is not None:
+                        ret_pa, proxyauth_used = curl.get_proxyauth_used()
+                        if (
+                            not curl._negotiate_retried
+                            and curl.auth & libcurl.CURLAUTH_NTLM
+                            and ret_pa == libcurl.CURLE_OK
+                            and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE
+                        ):
+                            # ANY picked Negotiate and GSS-API failed locally (no
+                            # ticket) without ever trying NTLM, which the proxy also
+                            # offered (libcurl http.c authproblem). SSPI on Windows
+                            # falls back to NTLM by itself, so proxyauth_used is
+                            # never left at NEGOTIATE there and this never matches.
+                            retry_without_negotiate = True
+                        else:
+                            # Proxy auth did not work for whatever reason
+                            out = "Proxy authentication failed: "
+                            if curl.user is not None:
+                                out += "check user/password or try different auth method"
+                            else:
+                                out += "single sign-on failed, user/password might be required"
+
+                            curl.resp = 401
+                            curl.errstr += out + "; "
+
+                            # Increment failure count for this proxy; block after threshold attempts
+                            auth_failed = True
                     else:
-                        out += "single sign-on failed, user/password might be required"
+                        # Setup client to authenticate directly with upstream proxy
+                        dprint(curl.easyhash + ": Client to authenticate with upstream proxy")
+                        if not curl.is_connect:
+                            # curl.errstr not set else connection will get closed during auth
+                            curl.resp = codep
+                elif curl.cerr == libcurl.CURLE_OK and not aborted and ret == libcurl.CURLE_OK and codep != 0:
+                    # Successful (or non‑auth) response – reset failure counter for this proxy
+                    auth_failed = False
 
-                    curl.resp = 401
-                    curl.errstr += out + "; "
+            if retry_without_negotiate:
+                # Retry once with Negotiate removed from the mask so libcurl's
+                # next attempt picks NTLM instead; this attempt does not count.
+                dprint(curl.easyhash + ": Negotiate failed locally, retrying with NTLM")
+                curl._negotiate_retried = True
+                curl.auth &= ~libcurl.CURLAUTH_NEGOTIATE
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(curl.auth))
+                if not curl.is_easy:
+                    with self._lock:
+                        self._remove_handle(curl)
+                # _update_transfers() only overwrites cerr on a new error, so a
+                # stale failure here would otherwise survive a successful retry
+                curl.cerr = libcurl.CURLE_OK
+                curl.resp = 503
+                curl.errstr = ""
+                curl.suppress = False
+                curl.sentheaders = False
+                curl.done = False
+                continue
 
-                    # Increment failure count for this proxy; block after threshold attempts
-                    auth_failed = True
-                else:
-                    # Setup client to authenticate directly with upstream proxy
-                    dprint(curl.easyhash + ": Client to authenticate with upstream proxy")
-                    if not curl.is_connect:
-                        # curl.errstr not set else connection will get closed during auth
-                        curl.resp = codep
-            elif curl.cerr == libcurl.CURLE_OK and not aborted and ret == libcurl.CURLE_OK and codep != 0:
-                # Successful (or non‑auth) response – reset failure counter for this proxy
-                auth_failed = False
-        if curl.proxy is not None:
-            self._record_proxy_auth(curl, auth_failed)
+            if curl.proxy is not None:
+                self._record_proxy_auth(curl, auth_failed)
+            break
 
         if curl.is_connect and curl.sock_fd is None:
             # Get the active socket for select()
