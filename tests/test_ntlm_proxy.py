@@ -11,6 +11,7 @@ import base64
 import socket
 import socketserver
 import struct
+import sys
 import threading
 
 import pytest
@@ -321,8 +322,8 @@ def test_concurrent_interrupted_handshakes_do_not_block(ntlm_proxy, connect):
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
 def test_final_407_counts_after_failed_connect_attempt(ntlm_proxy, connect):
     # The proxy host resolves first to a refused address, so the transfer
-    # carries an earlier socket errno (CURLINFO_OS_ERRNO) when the genuine
-    # final 407 arrives. The errno must not make the 407 inconclusive.
+    # carries an earlier socket errno on Linux when the genuine final 407
+    # arrives. The errno must not make the 407 inconclusive.
     multi = mcurl.MCurl()
     port = ntlm_proxy.server_address[1]
     url = f"http://ntlm-proxy.test:{port}"
@@ -331,7 +332,8 @@ def test_final_407_counts_after_failed_connect_attempt(ntlm_proxy, connect):
         for i in range(multi.failure_threshold):
             admitted, ok, curl = _request(multi, url, connect, user="wrong", resolve=resolve)
             assert admitted and not ok
-            assert curl.get_os_errno() != 0
+            if sys.platform.startswith("linux"):
+                assert curl.get_os_errno() != 0
             assert curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
             assert multi.failed[url] == i + 1
         assert not _request(multi, url, connect, resolve=resolve)[0]
