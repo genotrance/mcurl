@@ -286,7 +286,11 @@ queued release re-checks the `main` SHA before it commits anything.
    macOS runs `tools/brew_curl.sh` before compilation so its wheel uses the
    release's declared libcurl version (upgrading curl only when needed and
    failing on any mismatch).
-4. **`publish`** — first verifies that the resolved release version matches
+4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheel, installs
+   it into px's `devel` checkout, and runs px's Docker-backed corporate proxy
+   scenario suite with `PX_REQUIRE_MCURL_FIX=1`. It runs for every release and
+   dry run; a failure prevents publication.
+5. **`publish`** — first verifies that the resolved release version matches
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
    version, so a tag can never point at a commit declaring a different
@@ -303,8 +307,9 @@ validates depends on the ref:
 
 - On any ref (for example `devel`): the version resolution in `setup`, the
   sdist build and the complete wheel matrix including macOS `--release`
-  Homebrew refresh, repair and the smoke tests. The `publish` job is skipped
-  entirely because it runs only on `main`.
+  Homebrew refresh, repair and the smoke tests. The px corporate-proxy scenario
+  gate also runs. The `publish` job is skipped entirely because it runs only
+  on `main`.
 - On `main`: additionally the `publish` job's committed-version check, the
   artifact-version check, the PyPI state check and the dry-run publish plan
   notice, still without uploading or tagging.
@@ -347,7 +352,8 @@ against px, which consumes pymcurl in production.
      `gh workflow run build.yml -R genotrance/mcurl --ref main -f dry_run=true -f sha=<candidate>`,
      then `gh run list -R genotrance/mcurl -w "Build wheels" -L 1` and
      `gh run view <id> -R genotrance/mcurl` to confirm the sdist, all
-     `Build <os> <arch>` jobs and the `publish` job's dry-run checks passed.
+     `Build <os> <arch>` jobs, the `px-scenarios` gate, and the `publish`
+     job's dry-run checks passed.
      The ref must be `main` because only a `main` run executes the `publish`
      job (committed-version, artifact-version and PyPI-state checks); `sha`
      makes it build the candidate, not main's head. `main`'s copy of
@@ -357,13 +363,13 @@ against px, which consumes pymcurl in production.
    Makefile, using the exact libcurl base version from `pyproject.toml`, and
    run mcurl's full test suite against it. Ensure that the mcurl version built matches
    `pyproject.toml` exactly.
-3. **Install the candidate into px and run px's full test suite at least twice on both
-   `PX_EVENT_LOOP=unset` and `PX_EVENT_LOOP=asyncio`** against the candidate
-   and the previous pymcurl release for comparison. Run tests from outside
-   the developer's home directory to avoid `~/.env` interference with px's
-   authentication-chain tests. Any new failure blocks the release. The
-   HTTPS proxy-auth regression shipped in 8.23.0.1 was caught in px testing
-   post-release; this step is the gate that would have prevented it.
+3. Confirm the `px-scenarios` job passed in the `build.yml` dry run. It
+   installs the candidate Linux wheel into px's `devel` checkout and runs
+   px's Docker-backed corporate proxy scenarios, including HTTP and HTTPS
+   CONNECT proxy authentication. This automated gate replaced the manual px
+   suite run: any scenario failure blocks the release. The HTTPS proxy-auth
+   regression shipped in 8.23.0.1 was caught in px testing post-release; this
+   gate prevents that class of regression from reaching publication.
 4. Download the dry-run artifacts
    (`gh run download <id> -R genotrance/mcurl -D dry-run`) and compare the
    wheel platform tags with the previous release on PyPI. Verify that `i686`,
