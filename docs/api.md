@@ -119,7 +119,8 @@ with automatic Python-to-C type conversion.
 | `close()` | Release an auth-retry probe reservation held by this handle before it is run or reset |
 | `get_response()` | Return `(CURLcode, response_code)` of completed request; uses CONNECTCODE for CONNECT method |
 | `get_connect_response()` | Return `(CURLcode, HTTP status)` from a proxy CONNECT request |
-| `get_os_errno()` | Return the OS errno of the last failed connect, 0 if none |
+| `get_os_errno()` | Return the OS errno of any socket failure during the transfer, 0 if none; it is not cleared when a later connect attempt succeeds, so it does not say how the transfer ended |
+| `get_errorbuffer()` | Return libcurl's error message of the last failed operation (`CURLOPT_ERRORBUFFER`), empty if none |
 | `get_response_code()` | Return the HTTP response code (convenience, no CURLcode) |
 | `get_effective_url()` | Return the final URL after redirects |
 | `get_content_type()` | Return the Content-Type header value, or None |

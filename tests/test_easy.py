@@ -1,4 +1,9 @@
+import errno
+import http.server
 import json
+import socket
+import sys
+import threading
 import uuid
 
 import pytest
@@ -243,3 +248,55 @@ def test_get_proxyauth_used(httpbin_both):
     ret, auth = ec.get_proxyauth_used()
     assert ret == 0, f"get_proxyauth_used() error: {ret}"
     assert auth == 0, f"Expected no proxy auth, got {auth}"
+
+
+def test_get_os_errno(httpbin_both):
+    # Without any socket failure, get_os_errno() returns 0
+    ec = mcurl.Curl(httpbin_both.url + "/get")
+    ec.set_insecure(True)
+    ec.buffer()
+    assert ec.perform() == 0
+    assert ec.get_os_errno() == 0
+
+    # A refused connect reports the OS errno
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    ec = mcurl.Curl(f"http://127.0.0.1:{port}/")
+    assert ec.perform() == mcurl.libcurl.CURLE_COULDNT_CONNECT
+    assert ec.get_os_errno() != 0
+    assert "connect" in ec.get_errorbuffer().lower()
+    if sys.platform != "win32":
+        assert ec.get_os_errno() == errno.ECONNREFUSED
+
+
+def test_get_os_errno_persists_after_successful_connect():
+    # The errno is that of any socket failure during the transfer, so it is
+    # still set after a refused first address when the next address succeeds
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    slist = mcurl.libcurl.curl_slist_append(mcurl.ffi.NULL, f"errno.test:{port}:127.0.0.2,127.0.0.1".encode())
+    try:
+        ec = mcurl.Curl(f"http://errno.test:{port}/")
+        ec.setopt(mcurl.libcurl.CURLOPT_RESOLVE, slist)
+        ec.buffer()
+        assert ec.perform() == 0
+        assert ec.get_response_code() == 200
+        assert ec.get_os_errno() != 0
+        ec.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        mcurl.libcurl.curl_slist_free_all(slist)
