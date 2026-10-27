@@ -20,6 +20,12 @@ TARGET = "http://ntlm-proxy.invalid/"
 CONNECT_TARGET = "ntlm-proxy.invalid:443"
 USER = "user"
 BURST = 15
+HAS_NTLM = bool(mcurl.get_curl_vinfo().features & mcurl.libcurl.CURL_VERSION_NTLM)
+
+pytestmark = pytest.mark.skipif(
+    not HAS_NTLM,
+    reason="libcurl was built without NTLM support",
+)
 
 
 def _type2():
