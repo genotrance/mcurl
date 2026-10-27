@@ -21,6 +21,13 @@
   (502) rather than counted as an auth failure.
 - Only an HTTP status line with code 407 starts upstream 407 header
   suppression; other headers merely containing "407" are passed to the client.
+- With auth `ANY` on Linux/macOS, a proxy offering both Negotiate and NTLM no
+  longer blocks after 3 requests when there is no Kerberos ticket. libcurl
+  picks Negotiate and GSS-API fails locally without ever trying NTLM, which
+  the proxy also offered; `MCurl.do()` now retries once with Negotiate
+  removed from the auth mask so the next attempt uses NTLM, and only counts
+  an auth failure if that attempt also fails. Windows SSPI already falls
+  back to NTLM internally and is unaffected.
 
 ### New features
 - Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.

@@ -205,12 +205,6 @@ def _burst(multi, url, connect, count=BURST, user=USER, auth="ANY"):
     return results
 
 
-def _auth(proxy):
-    # Negotiate needs a KDC or SSPI that the test cannot provide, so pick NTLM
-    # explicitly when the proxy offers both, as SSPI would fall back to it
-    return "NTLM" if proxy.negotiate else "ANY"
-
-
 VARIANTS = [
     pytest.param({}, id="keepalive"),
     pytest.param({"close_first": True}, id="close"),
@@ -225,7 +219,7 @@ def test_concurrent_multi_leg_auth_does_not_block(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
         for _ in range(3):
-            results = _burst(multi, ntlm_proxy.url, connect, auth=_auth(ntlm_proxy))
+            results = _burst(multi, ntlm_proxy.url, connect)
             detail = [(c.cerr, c.resp, c.errstr) for _, ok, c in results if not ok]
             assert all(admitted for admitted, _, _ in results), detail
             assert all(ok for _, ok, _ in results), detail
@@ -244,9 +238,12 @@ def test_success_resets_failures(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
         multi.failed[ntlm_proxy.url] = multi.failure_threshold - 1
-        admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, auth=_auth(ntlm_proxy))
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
         assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
         assert multi.failed[ntlm_proxy.url] == 0
+        # Negotiate+NTLM proxies: confirms ANY actually fell back to NTLM,
+        # not that Negotiate somehow completed (it cannot, without a KDC)
+        assert multi.proxyauth.get(ntlm_proxy.url) == mcurl.libcurl.CURLAUTH_NTLM
     finally:
         multi.close()
 
@@ -257,7 +254,7 @@ def test_wrong_credentials_block_after_threshold(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
         for i in range(multi.failure_threshold):
-            admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, user="wrong", auth=_auth(ntlm_proxy))
+            admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, user="wrong")
             assert admitted and not ok
             assert curl.resp == 401
             assert multi.failed[ntlm_proxy.url] == i + 1
@@ -378,11 +375,12 @@ def test_truncated_407_headers_do_not_count(ntlm_proxy, connect):
 
 @pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
 def test_failed_auth_method_is_not_cached(ntlm_proxy):
-    # ANY picks Negotiate, which cannot complete without a KDC, so the final
-    # 407 must not cache it and override a later explicit NTLM request
+    # ANY picks Negotiate, which cannot complete without a KDC, so mcurl
+    # retries with NTLM; with a wrong password that also fails, and the final
+    # 407 must not cache a method that overrides a later explicit NTLM request
     multi = mcurl.MCurl()
     try:
-        admitted, ok, curl = _request(multi, ntlm_proxy.url, False, auth="ANY")
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, False, user="wrong", auth="ANY")
         assert admitted and not ok and curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
         assert ntlm_proxy.url not in multi.proxyauth
         assert multi.failed[ntlm_proxy.url] == 1
