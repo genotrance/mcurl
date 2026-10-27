@@ -1631,7 +1631,7 @@ wheels = [
 
 [[package]]
 name = "pymcurl"
-version = "8.23.0.2"
+version = "8.23.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "cffi", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10' and implementation_name == 'cpython'" },

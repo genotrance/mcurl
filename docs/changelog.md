@@ -2,6 +2,23 @@
 
 ---
 
+## v8.23.0.3 — TBD
+
+### Bug fixes
+- Proxy auth failures now count only the final CONNECT 407 response, not
+  CONNECT handshakes cut short by network errors. A working NTLM/Negotiate
+  proxy is no longer reported as failing (px#268). Transfers with such
+  errors report the network error (502) instead of 401.
+
+### New features
+- Added `Curl.get_os_errno()`.
+
+### Internal
+- NTLM proxy tests gate on `CURL_VERSION_NTLM` rather than platform or
+  Python version, since Homebrew libcurl on macOS can omit NTLM.
+
+---
+
 ## v8.23.0.2 — TBD
 
 - macOS arm64 wheels now require macOS 15 or later (changed in 8.23.0.1).
@@ -18,14 +35,6 @@
 - `auth_retry` treats stopped or callback-aborted probes, zero response
   codes, and non-407 CONNECT failures as inconclusive instead of counting
   them as authentication failures.
-- Fixed a regression in v8.23.0.2 where proxy CONNECT requests whose
-  NTLM/Negotiate handshake was cut by a network error (or a failed reconnect)
-  were counted as proxy authentication failures, because libcurl still reports
-  the 407 of the earlier challenge leg. A few such errors under concurrent load
-  blocked the upstream proxy for every later request (px#268). Only a CONNECT
-  the proxy finally refuses with 407 now counts; those transfers report the
-  network error (502) instead of 401.
-- Added `Curl.get_os_errno()`.
 
 ---
 
