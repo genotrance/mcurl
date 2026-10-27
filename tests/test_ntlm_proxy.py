@@ -8,7 +8,6 @@ count towards MCurl.failed; only a handshake that ends in a final 407 does.
 """
 
 import base64
-import socket
 import socketserver
 import struct
 import sys
@@ -135,8 +134,9 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
         close = kind == 3 or server.close_first
         self._challenge(offers, close=close)
         if close and server.refuse_after_close:
-            # Further connects are refused (ECONNREFUSED)
-            server.socket.shutdown(socket.SHUT_RD)
+            # Close the listening socket so later connects are refused.
+            # shutdown(SHUT_RD) has that effect on Unix, but fails on Windows.
+            server.server_close()
         return None if close else False
 
     def handle(self):
@@ -211,9 +211,16 @@ def _burst(multi, url, connect, count=BURST, user=USER, auth="ANY"):
 VARIANTS = [
     pytest.param({}, id="keepalive"),
     pytest.param({"close_first": True}, id="close"),
-    pytest.param({"negotiate": True}, id="negotiate-keepalive"),
-    pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
 ]
+if sys.platform != "win32":
+    # Windows SSPI handles the synthetic Negotiate exchange differently from
+    # the GSS-API path this regression covers.
+    VARIANTS.extend(
+        [
+            pytest.param({"negotiate": True}, id="negotiate-keepalive"),
+            pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
+        ]
+    )
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
