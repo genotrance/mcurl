@@ -171,7 +171,7 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `set_xferinfo(callback)` | Set transfer progress callback `fn(dltotal, dlnow, ultotal, ulnow) -> int` |
-| `set_seek(callback=None)` | Set seek callback `fn(offset, origin) -> int`; returns `CURL_SEEKFUNC_OK`(0)/`FAIL`(1)/`CANTSEEK`(2) |
+| `set_seek(callback=None)` | Set seek callback `fn(offset, origin) -> int`; returns `CURL_SEEKFUNC_OK`(0)/`FAIL`(1)/`CANTSEEK`(2). A rewind to offset 0 restores the declared Content-Length, so the body is resent across proxy auth legs; without a working seek, the Negotiate-to-NTLM retry of a request with a body is skipped (inconclusive, 503) |
 
 ### Handle duplication and lifecycle
 

@@ -61,6 +61,7 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         self.lock = threading.Lock()
         self.challenges = 0  # 407 responses sent, intermediate or final
         self.authenticated = 0  # Successful type3 legs
+        self.bodies = []  # (method, body) of requests answered after authentication
 
     @property
     def url(self):
@@ -80,8 +81,7 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
             name, _, value = header.decode("latin-1").partition(":")
             headers[name.strip().lower()] = value.strip()
         length = int(headers.get("content-length", 0))
-        if length:
-            self.rfile.read(length)
+        self.body = self.rfile.read(length) if length else b""
         return line.decode("latin-1").split()[0], headers
 
     def _send(self, code, headers=(), body=b""):
@@ -156,6 +156,8 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
                 while self.rfile.read(4096):
                     pass
                 return
+            with self.server.lock:
+                self.server.bodies.append((method, self.body))
             self._send(200, [], b"ok")
 
 
@@ -438,5 +440,83 @@ def test_header_containing_407_is_not_a_407_status(ntlm_proxy):
         # The 407 challenge legs of the handshake stay hidden from the client
         assert "407" not in headers.split("\r\n", 1)[0]
         assert "Proxy-Authenticate" not in headers
+    finally:
+        multi.close()
+
+
+BODY = bytes(range(256)) * 24  # 6 KB, not text
+
+
+def _body_request(multi, url, method, body, auth="ANY", user=USER, easy=False):
+    # POST/PUT with a known-length body supplied through the read callback
+    curl = mcurl.Curl(TARGET, method=method)
+    curl.buffer(body)
+    curl.set_headers({"Content-Length": str(len(body))})
+    curl.is_easy = easy
+    assert curl.set_proxy(url)
+    curl.set_auth(user, "pass", auth=auth)
+    return multi.do(curl), curl
+
+
+@pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+@pytest.mark.parametrize("ntlm_proxy", [v.values[0] for v in VARIANTS], ids=[v.id for v in VARIANTS], indirect=True)
+def test_body_resent_across_auth_legs(ntlm_proxy, method, easy):
+    # ANY sends the whole body on the first unauthenticated leg, so libcurl has
+    # to rewind and resend it on the authenticated leg (and, with Negotiate
+    # failing locally, once more for the NTLM retry)
+    multi = mcurl.MCurl()
+    try:
+        ok, curl = _body_request(multi, ntlm_proxy.url, method, BODY, easy=easy)
+        assert ok and curl.cerr == 0 and curl.get_response()[1] == 200, (curl.cerr, curl.resp, curl.errstr)
+        assert ntlm_proxy.bodies == [(method, BODY)]
+        assert multi.failed.get(ntlm_proxy.url, 0) == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+@pytest.mark.parametrize("ntlm_proxy", [{}, {"negotiate": True}], indirect=True, ids=["ntlm", "negotiate"])
+def test_body_explicit_ntlm(ntlm_proxy, method, easy):
+    multi = mcurl.MCurl()
+    try:
+        ok, curl = _body_request(multi, ntlm_proxy.url, method, BODY, auth="NTLM", easy=easy)
+        assert ok and curl.get_response()[1] == 200, (curl.cerr, curl.resp, curl.errstr)
+        assert ntlm_proxy.bodies == [(method, BODY)]
+        assert multi.failed.get(ntlm_proxy.url, 0) == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}, {"negotiate": True, "close_first": True}], indirect=True, ids=["keepalive", "close"])
+def test_body_wrong_password_counts_once(ntlm_proxy, method, easy):
+    multi = mcurl.MCurl()
+    try:
+        ok, curl = _body_request(multi, ntlm_proxy.url, method, BODY, user="wrong", easy=easy)
+        assert not ok and curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
+        assert multi.failed[ntlm_proxy.url] == 1
+        assert ntlm_proxy.bodies == []
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
+def test_body_not_rewindable_negotiate_retry_is_inconclusive(ntlm_proxy):
+    # A body source that cannot seek cannot be resent for the NTLM retry: the
+    # result is inconclusive and does not count as an auth failure
+    multi = mcurl.MCurl()
+    try:
+        curl = mcurl.Curl(TARGET, method="POST")
+        curl.buffer(BODY)
+        curl.set_seek(lambda offset, origin: mcurl.libcurl.CURL_SEEKFUNC_CANTSEEK)
+        curl.set_headers({"Content-Length": str(len(BODY))})
+        assert curl.set_proxy(ntlm_proxy.url)
+        curl.set_auth(USER, "pass", auth="ANY")
+        assert not multi.do(curl)
+        assert curl.resp != 401
+        assert multi.failed.get(ntlm_proxy.url, 0) == 0
     finally:
         multi.close()

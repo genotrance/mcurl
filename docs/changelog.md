@@ -28,6 +28,12 @@
   removed from the auth mask so the next attempt uses NTLM, and only counts
   an auth failure if that attempt also fails. Windows SSPI already falls
   back to NTLM internally and is unaffected.
+- POST/PUT request bodies sent through the read callback are now resent
+  across proxy auth legs and the Negotiate-to-NTLM retry. With auth `ANY`
+  libcurl sends the body on the first unauthenticated leg and rewinds to
+  resend it; the read budget was not restored on rewind, so such requests
+  failed with Curl error 26 (resp 503). A body source that cannot be
+  rewound makes the NTLM retry inconclusive (503) rather than an auth failure.
 
 ### New features
 - Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
