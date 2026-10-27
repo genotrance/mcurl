@@ -272,8 +272,8 @@ def test_get_os_errno(httpbin_both):
 
 
 def test_get_os_errno_persists_after_successful_connect():
-    # The errno is that of any socket failure during the transfer, so it is
-    # still set after a refused first address when the next address succeeds
+    # Linux libcurl retains an earlier socket failure after a later address
+    # succeeds. Windows and macOS report only the final successful connect.
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -294,7 +294,8 @@ def test_get_os_errno_persists_after_successful_connect():
         ec.buffer()
         assert ec.perform() == 0
         assert ec.get_response_code() == 200
-        assert ec.get_os_errno() != 0
+        if sys.platform.startswith("linux"):
+            assert ec.get_os_errno() != 0
         ec.close()
     finally:
         server.shutdown()

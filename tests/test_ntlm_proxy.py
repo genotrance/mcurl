@@ -8,9 +8,9 @@ count towards MCurl.failed; only a handshake that ends in a final 407 does.
 """
 
 import base64
-import socket
 import socketserver
 import struct
+import sys
 import threading
 
 import pytest
@@ -134,8 +134,9 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
         close = kind == 3 or server.close_first
         self._challenge(offers, close=close)
         if close and server.refuse_after_close:
-            # Further connects are refused (ECONNREFUSED)
-            server.socket.shutdown(socket.SHUT_RD)
+            # Close the listening socket so later connects are refused.
+            # shutdown(SHUT_RD) has that effect on Unix, but fails on Windows.
+            server.server_close()
         return None if close else False
 
     def handle(self):
@@ -210,9 +211,14 @@ def _burst(multi, url, connect, count=BURST, user=USER, auth="ANY"):
 VARIANTS = [
     pytest.param({}, id="keepalive"),
     pytest.param({"close_first": True}, id="close"),
-    pytest.param({"negotiate": True}, id="negotiate-keepalive"),
-    pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
 ]
+if sys.platform != "win32":
+    # Windows SSPI handles the synthetic Negotiate exchange differently from
+    # the GSS-API path this regression covers.
+    VARIANTS.extend([
+        pytest.param({"negotiate": True}, id="negotiate-keepalive"),
+        pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
+    ])
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
@@ -321,8 +327,8 @@ def test_concurrent_interrupted_handshakes_do_not_block(ntlm_proxy, connect):
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
 def test_final_407_counts_after_failed_connect_attempt(ntlm_proxy, connect):
     # The proxy host resolves first to a refused address, so the transfer
-    # carries an earlier socket errno (CURLINFO_OS_ERRNO) when the genuine
-    # final 407 arrives. The errno must not make the 407 inconclusive.
+    # carries an earlier socket errno on Linux when the genuine final 407
+    # arrives. The errno must not make the 407 inconclusive.
     multi = mcurl.MCurl()
     port = ntlm_proxy.server_address[1]
     url = f"http://ntlm-proxy.test:{port}"
@@ -331,7 +337,8 @@ def test_final_407_counts_after_failed_connect_attempt(ntlm_proxy, connect):
         for i in range(multi.failure_threshold):
             admitted, ok, curl = _request(multi, url, connect, user="wrong", resolve=resolve)
             assert admitted and not ok
-            assert curl.get_os_errno() != 0
+            if sys.platform.startswith("linux"):
+                assert curl.get_os_errno() != 0
             assert curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
             assert multi.failed[url] == i + 1
         assert not _request(multi, url, connect, resolve=resolve)[0]
