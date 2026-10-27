@@ -1115,6 +1115,12 @@ class Curl:
         ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_HTTP_CONNECTCODE, codep)
         return ret, codep[0]
 
+    def get_os_errno(self):
+        "Return the OS errno of the last failed connect, 0 if none"
+        codep = ffi.new("long *")
+        libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_OS_ERRNO, codep)
+        return codep[0]
+
     def get_activesocket(self):
         "Return (CURLcode, socket_fd) for this handle's active connection"
         if sys.platform == "win32":
@@ -1619,12 +1625,16 @@ class MCurl:
         # stop() leaves CURLE_OK and a zero response code, so it must not clear
         # a blocked proxy. A CONNECT 407 is the exception: libcurl reports it
         # as CURLE_COULDNT_CONNECT, but the proxy's auth response is reliable.
+        # Any other error, or a failed (re)connect, interrupted the handshake
+        # and leaves the 407 of an intermediate leg in HTTP_CONNECTCODE (px#268).
         auth_failed = None
         if curl.proxy is not None:
             aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
             ret, codep = curl.get_response()
-            if curl.cerr != libcurl.CURLE_OK and not aborted:
+            if curl.cerr != libcurl.CURLE_OK:
                 ret, codep = curl.get_connect_response()
+                if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or curl.get_os_errno() != 0:
+                    aborted = True
             if not aborted and ret == libcurl.CURLE_OK and codep == 407:
                 # Proxy authentication required
                 if curl.auth is not None:
