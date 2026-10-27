@@ -129,6 +129,7 @@ with automatic Python-to-C type conversion.
 | `get_primary_ip()` | Return `(CURLcode, ip_string)` of the remote server |
 | `get_used_proxy()` | Return `(CURLcode, bool)` indicating whether a proxy was used |
 | `get_proxyauth_used()` | Return `(CURLcode, auth_bitmask)` for the proxy auth method that was negotiated |
+| `get_num_connects()` | Return `(CURLcode, count)` of successful connections created for the transfer |
 
 ### Authentication
 
@@ -227,9 +228,9 @@ Pass a callable as `debug_print` to enable debug output (e.g. `MCurl(debug_print
 
 ### Proxy auth failures
 
-When a request with proxy auth configured receives a 407, the proxy's failure
-count increases; any other response resets it. Once the count reaches the
-failure threshold, `Curl.set_proxy()` returns `False` for that proxy. By
+When a request with proxy auth configured receives a final 407, the proxy's
+failure count increases; any other response resets it. Once the count reaches
+the failure threshold, `Curl.set_proxy()` returns `False` for that proxy. By
 default this lasts until `reset_proxy_failures()` is called. With an auth
 retry interval set, the first `set_proxy()` call after the interval becomes a
 probe while every other caller is still refused, so a burst of requests sends
@@ -243,6 +244,17 @@ probe per interval. Proxy CONNECT responses with status 407, including HTTPS
 proxy CONNECT failures, count as authentication failures. Stopped or
 callback-aborted probes, zero response codes, and non-407 CONNECT failures
 are inconclusive and do not count.
+
+NTLM and Negotiate are connection-bound. If libcurl closes after a complete
+NTLM type2 response and then resumes by sending type3 on a newly connected
+proxy socket, the resulting fresh 407 is not treated as a rejected login.
+`do()` retries that request once with a fresh, non-reusable connection and
+counts only the retry's final result. Requests with a body are retried only
+when its read callback can rewind to offset zero; otherwise the result is
+inconclusive (503). The detection combines libcurl's `NTLM handshake
+rejected` diagnostic with `CURLINFO_NUM_CONNECTS > 1`; the latter counts only
+successful connections, so failed happy-eyeballs addresses cannot conceal a
+genuine 407.
 
 With auth `ANY` on Linux/macOS, a proxy offering both Negotiate and NTLM
 makes libcurl pick Negotiate; without a Kerberos ticket, GSS-API fails to

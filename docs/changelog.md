@@ -9,6 +9,11 @@
   CONNECT handshakes cut short by network errors. A working NTLM/Negotiate
   proxy is no longer reported as failing (px#268). Transfers with such
   errors report the network error (502) instead of 401.
+- A complete NTLM type2 challenge followed by a network cut no longer blocks
+  a working proxy when libcurl resumes the connection-bound handshake by
+  sending type3 on a new connection. mcurl retries once on a fresh connection
+  and counts only that outcome; non-rewindable request bodies remain
+  inconclusive (503) instead of being counted as bad credentials.
 - A genuine final CONNECT 407 is now counted (401) even when an earlier
   socket failure occurred in the same transfer, such as a refused first
   address. The decision uses libcurl's error message instead of the OS errno.
