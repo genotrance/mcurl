@@ -215,12 +215,10 @@ VARIANTS = [
 if sys.platform != "win32":
     # Windows SSPI handles the synthetic Negotiate exchange differently from
     # the GSS-API path this regression covers.
-    VARIANTS.extend(
-        [
-            pytest.param({"negotiate": True}, id="negotiate-keepalive"),
-            pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
-        ]
-    )
+    VARIANTS.extend([
+        pytest.param({"negotiate": True}, id="negotiate-keepalive"),
+        pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
+    ])
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
