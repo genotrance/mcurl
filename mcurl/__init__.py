@@ -37,6 +37,8 @@ MCURL = None
 KEEPALIVE_IDLE = 30
 KEEPALIVE_INTERVAL = 10
 KEEPALIVE_COUNT = 3
+ERROR_BUFFER_SIZE = 256  # CURL_ERROR_SIZE
+TUNNEL_407 = "CONNECT tunnel failed, response 407"  # libcurl message for a final CONNECT 407
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
 MULTI_SELECT_TIMEOUT = 1.0
@@ -232,6 +234,12 @@ def write_callback(buffer, size, nitems, userdata):
     return tsize
 
 
+def _is_407_status_line(data):
+    "True if data is an HTTP status line (HTTP/x.x 407 ...)"
+    parts = data.split(None, 2)
+    return len(parts) >= 2 and parts[0].startswith(b"HTTP/") and parts[1] == b"407"
+
+
 @ffi.def_extern()
 def header_callback(buffer, size, nitems, userdata):
     tsize = size * nitems
@@ -249,8 +257,8 @@ def header_callback(buffer, size, nitems, userdata):
                 # Done sending headers
                 dprint(curl.easyhash + ": Done sending headers")
                 curl.sentheaders = True
-            elif curl.auth is not None and data[0] == 72 and b"407" in data:
-                # Header starts with H and has 407 - HTTP/x.x 407 (issue #148)
+            elif curl.auth is not None and _is_407_status_line(data):
+                # HTTP status line with status code 407 (issue #148)
                 # Px is configured to authenticate so don't send auth related
                 # headers from upstream proxy to client
                 dprint(curl.easyhash + ": Suppressing headers")
@@ -392,9 +400,20 @@ class Curl:
         self._keepalive.append(cobj)
         return cobj
 
+    def _set_errorbuffer(self):
+        "Give this handle its own libcurl error buffer (libcurl keeps only the message of the last failure)"
+        self._errbuf = ffi.new("char[]", ERROR_BUFFER_SIZE)
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_ERRORBUFFER, self._errbuf)
+
+    def get_errorbuffer(self):
+        "Return the libcurl error message of the last failed operation, empty if none"
+        return ffi.string(self._errbuf).decode("utf-8", "replace")
+
     def _setup(self, url, method, request_version, connect_timeout):
         "Setup curl instance based on request info"
         dprint(self.easyhash + ": %s %s using %s" % (method, url, request_version))
+
+        self._set_errorbuffer()
 
         # Ignore proxy environment variables
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_PROXY, self._keepstr(""))
@@ -961,6 +980,7 @@ class Curl:
         new._keepalive = []
         new._xferinfo_fn = None
         new._seek_fn = None
+        new._set_errorbuffer()
         new.ceasyhash = new._keepstr(new.easyhash)
 
         # Copy Python-level state
@@ -1116,7 +1136,7 @@ class Curl:
         return ret, codep[0]
 
     def get_os_errno(self):
-        "Return the OS errno of the last failed connect, 0 if none"
+        "Return the OS errno of any socket failure during the transfer, 0 if none"
         codep = ffi.new("long *")
         libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_OS_ERRNO, codep)
         return codep[0]
@@ -1185,6 +1205,12 @@ class Curl:
         if self.proxy in MCURL.proxyauth:
             # Already cached
             dprint(f"{self.easyhash}: Proxy auth method already cached")
+            return
+
+        ret, code = self.get_response()
+        if ret != libcurl.CURLE_OK or code in (0, 407):
+            # No response or the proxy rejected the auth method used - not worth caching
+            dprint(f"{self.easyhash}: Not caching proxy auth method: response {code}")
             return
 
         ret, proxyauth_used = self.get_proxyauth_used()
@@ -1367,10 +1393,12 @@ class MCurl:
                 self.failed.clear()
                 self._blocked.clear()
                 self._probe.clear()
+                self.proxyauth.clear()
             else:
                 self.failed.pop(proxy, None)
                 self._blocked.pop(proxy, None)
                 self._probe.pop(proxy, None)
+                self.proxyauth.pop(proxy, None)
 
     def _admit_proxy(self, curl, proxy):
         # Decide whether curl may use proxy given its auth failure state
@@ -1418,6 +1446,8 @@ class MCurl:
                 return
             interval = self._blocked.get(proxy, (0, self.auth_retry))[1]
             if auth_failed:
+                # Forget the cached auth method so a different one can be tried
+                self.proxyauth.pop(proxy, None)
                 self.failed[proxy] = self.failed.get(proxy, 0) + 1
                 if self.failed[proxy] < self.failure_threshold:
                     return
@@ -1633,11 +1663,18 @@ class MCurl:
             ret, codep = curl.get_response()
             if curl.cerr != libcurl.CURLE_OK:
                 ret, codep = curl.get_connect_response()
-                if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or curl.get_os_errno() != 0:
+                if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or TUNNEL_407 not in curl.get_errorbuffer():
+                    # CURLINFO_OS_ERRNO and HTTP_CONNECTCODE persist across the
+                    # legs of a transfer so libcurl's last error message decides
                     aborted = True
             if not aborted and ret == libcurl.CURLE_OK and codep == 407:
                 # Proxy authentication required
-                if curl.auth is not None:
+                if curl.suppress:
+                    # 407 header block never completed - connection cut mid-headers
+                    dprint(curl.easyhash + ": Truncated 407 response")
+                    curl.resp = 502
+                    curl.errstr += "Truncated proxy response; "
+                elif curl.auth is not None:
                     # Proxy auth did not work for whatever reason
                     out = "Proxy authentication failed: "
                     if curl.user is not None:

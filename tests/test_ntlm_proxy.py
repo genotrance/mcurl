@@ -8,6 +8,7 @@ count towards MCurl.failed; only a handshake that ends in a final 407 does.
 """
 
 import base64
+import socket
 import socketserver
 import struct
 import threading
@@ -47,13 +48,16 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     request_queue_size = 128
 
-    def __init__(self, close_first=False, negotiate=False):
+    def __init__(self, close_first=False, negotiate=False, refuse_after_close=False):
         super().__init__(("127.0.0.1", 0), _NtlmHandler)
         # close_first: close the connection after the initial challenge, so
         # libcurl has to reconnect to send type1 (keep-alive otherwise)
         self.close_first = close_first
         self.negotiate = negotiate
         self.drop_type2 = 0  # Handshakes to interrupt by closing before type2
+        self.drop_headers = 0  # Handshakes to cut off in the middle of the 407 headers
+        self.refuse_after_close = refuse_after_close  # Stop listening after a 407 with Connection: close
+        self.extra_headers = []  # Added to 200 responses
         self.lock = threading.Lock()
         self.challenges = 0  # 407 responses sent, intermediate or final
         self.authenticated = 0  # Successful type3 legs
@@ -83,6 +87,8 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
     def _send(self, code, headers=(), body=b""):
         reason = {200: "OK", 407: "Proxy Authentication Required"}[code]
         out = [f"HTTP/1.1 {code} {reason}", *headers]
+        if code == 200:
+            out.extend(self.server.extra_headers)
         if code != 200 or body:
             out.append(f"Content-Length: {len(body)}")
         self.wfile.write(("\r\n".join(out) + "\r\n\r\n").encode() + body)
@@ -106,8 +112,15 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
             with server.lock:
                 drop = server.drop_type2 > 0
                 server.drop_type2 -= drop
+                cut = server.drop_headers > 0
+                server.drop_headers -= cut
             if drop:
                 # Interrupt the handshake: close instead of sending type2
+                return None
+            if cut:
+                # Close in the middle of the 407 header block
+                self.wfile.write(b"HTTP/1.1 407 X\r\nProxy-Authenticate: NTLM ")
+                self.wfile.flush()
                 return None
             self._challenge(["Proxy-Authenticate: NTLM " + base64.b64encode(_type2()).decode()])
             return False
@@ -120,6 +133,9 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
             offers.insert(0, "Proxy-Authenticate: Negotiate")
         close = kind == 3 or server.close_first
         self._challenge(offers, close=close)
+        if close and server.refuse_after_close:
+            # Further connects are refused (ECONNREFUSED)
+            server.socket.shutdown(socket.SHUT_RD)
         return None if close else False
 
     def handle(self):
@@ -152,13 +168,22 @@ def ntlm_proxy(request):
     server.server_close()
 
 
-def _request(multi, url, connect, user=USER, auth="ANY"):
-    # Returns (admitted, success, curl)
+def ffi_slist_guard(slist):
+    # Free the slist when the handle (and so the keepalive list) is collected
+    return mcurl.ffi.gc(slist, mcurl.libcurl.curl_slist_free_all)
+
+
+def _request(multi, url, connect, user=USER, auth="ANY", resolve=None):
+    # Returns (admitted, success, curl); resolve is a CURLOPT_RESOLVE entry
     curl = mcurl.Curl(CONNECT_TARGET, method="CONNECT") if connect else mcurl.Curl(TARGET)
     if not connect:
         curl.buffer()
     if not curl.set_proxy(url):
         return False, False, curl
+    if resolve is not None:
+        slist = mcurl.libcurl.curl_slist_append(mcurl.ffi.NULL, resolve.encode())
+        curl._keepalive.append(ffi_slist_guard(slist))
+        curl.setopt(mcurl.libcurl.CURLOPT_RESOLVE, slist)
     curl.set_auth(user, "pass", auth=auth)
     ok = multi.do(curl)
     return True, ok, curl
@@ -290,5 +315,130 @@ def test_concurrent_interrupted_handshakes_do_not_block(ntlm_proxy, connect):
         detail = [(c.cerr, c.resp, c.errstr) for _, ok, c in results if not ok]
         assert all(admitted and ok for admitted, ok, _ in results), detail
         assert multi.failed[ntlm_proxy.url] == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+def test_final_407_counts_after_failed_connect_attempt(ntlm_proxy, connect):
+    # The proxy host resolves first to a refused address, so the transfer
+    # carries an earlier socket errno (CURLINFO_OS_ERRNO) when the genuine
+    # final 407 arrives. The errno must not make the 407 inconclusive.
+    multi = mcurl.MCurl()
+    port = ntlm_proxy.server_address[1]
+    url = f"http://ntlm-proxy.test:{port}"
+    resolve = f"ntlm-proxy.test:{port}:127.0.0.2,127.0.0.1"
+    try:
+        for i in range(multi.failure_threshold):
+            admitted, ok, curl = _request(multi, url, connect, user="wrong", resolve=resolve)
+            assert admitted and not ok
+            assert curl.get_os_errno() != 0
+            assert curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
+            assert multi.failed[url] == i + 1
+        assert not _request(multi, url, connect, resolve=resolve)[0]
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+@pytest.mark.parametrize("ntlm_proxy", [{"close_first": True, "refuse_after_close": True}], indirect=True)
+def test_407_close_then_refused_reconnect_is_inconclusive(ntlm_proxy, connect):
+    # A 407 leg with Connection: close followed by a refused reconnect leaves
+    # that leg's 407 as the connect code, but it was not the final answer
+    multi = mcurl.MCurl()
+    try:
+        for _ in range(multi.failure_threshold + 1):
+            admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
+            assert admitted and not ok
+            assert curl.cerr != 0 and curl.get_os_errno() != 0
+            assert curl.resp == 502, (curl.cerr, curl.resp, curl.errstr)
+            assert multi.failed.get(ntlm_proxy.url, 0) == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+@pytest.mark.parametrize("ntlm_proxy", VARIANTS[:2], indirect=True)
+def test_truncated_407_headers_do_not_count(ntlm_proxy, connect):
+    # A proxy that closes in the middle of the 407 header block never gave an
+    # auth answer, even if libcurl reports CURLE_OK with response code 407
+    multi = mcurl.MCurl()
+    try:
+        ntlm_proxy.drop_headers = multi.failure_threshold + 2
+        for _ in range(multi.failure_threshold + 2):
+            admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
+            assert admitted
+            assert ok or curl.resp == 502, (curl.cerr, curl.resp, curl.errstr)
+            assert multi.failed.get(ntlm_proxy.url, 0) == 0
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
+        assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
+def test_failed_auth_method_is_not_cached(ntlm_proxy):
+    # ANY picks Negotiate, which cannot complete without a KDC, so the final
+    # 407 must not cache it and override a later explicit NTLM request
+    multi = mcurl.MCurl()
+    try:
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, False, auth="ANY")
+        assert admitted and not ok and curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
+        assert ntlm_proxy.url not in multi.proxyauth
+        assert multi.failed[ntlm_proxy.url] == 1
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, False, auth="NTLM")
+        assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
+        assert multi.failed[ntlm_proxy.url] == 0
+        assert multi.proxyauth.get(ntlm_proxy.url) == mcurl.libcurl.CURLAUTH_NTLM
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+def test_final_407_clears_cached_auth(ntlm_proxy, connect):
+    multi = mcurl.MCurl()
+    try:
+        admitted, ok, _ = _request(multi, ntlm_proxy.url, connect)
+        assert admitted and ok
+        assert multi.proxyauth[ntlm_proxy.url] == mcurl.libcurl.CURLAUTH_NTLM
+    finally:
+        multi.close()
+    multi = mcurl.MCurl()
+    try:
+        # A method cached earlier is dropped once the proxy rejects it
+        multi.proxyauth[ntlm_proxy.url] = mcurl.libcurl.CURLAUTH_NTLM
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, user="wrong")
+        assert admitted and not ok and curl.resp == 401
+        assert ntlm_proxy.url not in multi.proxyauth
+    finally:
+        multi.close()
+
+
+def test_reset_proxy_failures_clears_cached_auth():
+    multi = mcurl.MCurl()
+    try:
+        multi.proxyauth.update({"a": 1, "b": 2})
+        multi.reset_proxy_failures("a")
+        assert multi.proxyauth == {"b": 2}
+        multi.reset_proxy_failures()
+        assert multi.proxyauth == {}
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("ntlm_proxy", [{}], indirect=True)
+def test_header_containing_407_is_not_a_407_status(ntlm_proxy):
+    # Only an HTTP status line with code 407 starts header suppression
+    ntlm_proxy.extra_headers = ["Host-Id: a407", "Proxy-Agent: fake-407", "X-Code: 407"]
+    multi = mcurl.MCurl()
+    try:
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, False)
+        assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
+        headers = curl.get_headers()
+        for line in ntlm_proxy.extra_headers:
+            assert line in headers
+        # The 407 challenge legs of the handshake stay hidden from the client
+        assert "407" not in headers.split("\r\n", 1)[0]
+        assert "Proxy-Authenticate" not in headers
     finally:
         multi.close()

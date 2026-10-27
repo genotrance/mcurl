@@ -9,9 +9,21 @@
   CONNECT handshakes cut short by network errors. A working NTLM/Negotiate
   proxy is no longer reported as failing (px#268). Transfers with such
   errors report the network error (502) instead of 401.
+- A genuine final CONNECT 407 is now counted (401) even when an earlier
+  socket failure occurred in the same transfer, such as a refused first
+  address. The decision uses libcurl's error message instead of the OS errno.
+- A failed proxy auth method is no longer cached: only a successful
+  non-407 response caches the method, and a final 407 or
+  `reset_proxy_failures()` clears the cached entry. Previously a failed
+  `ANY` attempt could override the auth later requested and keep the proxy
+  blocked even with `auth_retry`.
+- A plain-HTTP 407 whose headers are cut off mid-response is inconclusive
+  (502) rather than counted as an auth failure.
+- Only an HTTP status line with code 407 starts upstream 407 header
+  suppression; other headers merely containing "407" are passed to the client.
 
 ### New features
-- Added `Curl.get_os_errno()`.
+- Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
 
 ### Internal
 - NTLM proxy tests gate on `CURL_VERSION_NTLM` rather than platform or
