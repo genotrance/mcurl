@@ -144,9 +144,54 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
+  px-scenarios:
+    # A dry run is a release rehearsal, so it runs the same consumer regression
+    # gate. Normal devel dispatches do not need the Docker scenario environment.
+    if: needs.setup.outputs.dry_run == 'true' || (needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main')
+    needs: [setup, build-wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out px scenario suite
+        uses: actions/checkout@v7
+        with:
+          repository: genotrance/px
+          ref: devel
+          path: px
+
+      - name: Download Linux candidate wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-ubuntu-latest-x86_64
+          path: wheelhouse
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install px with the candidate wheel
+        working-directory: px
+        run: |
+          uv venv --python 3.13 .venv
+          uv sync --locked
+          WHEEL=$(find ../wheelhouse -name 'pymcurl-*-cp39-abi3-*.whl' -print -quit)
+          test -n "$WHEEL"
+          uv pip install --python .venv/bin/python --reinstall "$WHEEL"
+          .venv/bin/python -c "import mcurl; print(mcurl.curl_version())"
+
+      - name: Run px corporate proxy scenarios
+        working-directory: px
+        env:
+          PX_REQUIRE_MCURL_FIX: "1"
+          PX_SCENARIO_ENV: start
+        run: uv run --locked --no-sync python -m pytest tests/scenarios -m scenario -v
+
+      - name: Clean up px scenario environment
+        if: always()
+        working-directory: px
+        run: tools/scenario-env.sh down
+
   publish:
-    needs: [setup, build-sdist, build-wheels]
-    if: needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main'
+    needs: [setup, build-sdist, build-wheels, px-scenarios]
+    if: always() && needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main' && needs.px-scenarios.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
