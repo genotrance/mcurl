@@ -491,7 +491,12 @@ def test_body_explicit_ntlm(ntlm_proxy, method, easy):
 
 @pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
 @pytest.mark.parametrize("method", ["POST", "PUT"])
-@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}, {"negotiate": True, "close_first": True}], indirect=True, ids=["keepalive", "close"])
+@pytest.mark.parametrize(
+    "ntlm_proxy",
+    [{"negotiate": True}, {"negotiate": True, "close_first": True}],
+    indirect=True,
+    ids=["keepalive", "close"],
+)
 def test_body_wrong_password_counts_once(ntlm_proxy, method, easy):
     multi = mcurl.MCurl()
     try:
