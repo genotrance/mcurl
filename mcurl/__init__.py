@@ -39,6 +39,7 @@ KEEPALIVE_INTERVAL = 10
 KEEPALIVE_COUNT = 3
 ERROR_BUFFER_SIZE = 256  # CURL_ERROR_SIZE
 TUNNEL_407 = "CONNECT tunnel failed, response 407"  # libcurl message for a final CONNECT 407
+NTLM_RECONNECT_REJECTED = "NTLM handshake rejected"
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
 MULTI_SELECT_TIMEOUT = 1.0
@@ -168,18 +169,26 @@ def debug_callback(easy, infotype, data, size, userp):
 
     del userp
     easyhash = gethash(easy)
-    curl = MCURL.handles[easyhash]
+    curl = MCURL.handles.get(easyhash)
+    if curl is None:
+        return libcurl.CURLE_OK
     if infotype == libcurl.CURLINFO_TEXT:
-        prefix = easyhash + ": Curl info: "
-    elif infotype == libcurl.CURLINFO_HEADER_IN:
+        for msg in yield_msgs(data, size):
+            if NTLM_RECONNECT_REJECTED in msg:
+                curl._ntlm_reconnect_rejected = True
+            if curl._debug:
+                dprint(easyhash + ": Curl info: " + sanitized(msg))
+        return libcurl.CURLE_OK
+    if infotype == libcurl.CURLINFO_HEADER_IN:
         prefix = easyhash + ": Received header <= "
     elif infotype == libcurl.CURLINFO_HEADER_OUT:
         prefix = easyhash + ": Sent header => "
     else:
         return libcurl.CURLE_OK
 
-    for msg in yield_msgs(data, size):
-        dprint(prefix + sanitized(msg))
+    if curl._debug:
+        for msg in yield_msgs(data, size):
+            dprint(prefix + sanitized(msg))
 
     return libcurl.CURLE_OK
 
@@ -344,6 +353,9 @@ class Curl:
     _probe_proxy = None
     _stopped = False
     _negotiate_retried = False
+    _ntlm_reconnect_rejected = False
+    _ntlm_reconnect_retried = False
+    _debug = False
 
     @staticmethod
     def strerror(code):
@@ -506,6 +518,9 @@ class Curl:
         self.cerr = libcurl.CURLE_OK
         self._stopped = False
         self._negotiate_retried = False
+        self._ntlm_reconnect_rejected = False
+        self._ntlm_reconnect_retried = False
+        self._debug = False
         self.done = False
         self.errstr = ""
         self.resp = 503
@@ -664,6 +679,7 @@ class Curl:
     def set_debug(self, enable=True):
         "Enable verbose mode with debug callback routed through dprint()"
         if enable:
+            self._debug = True
             self.set_verbose()
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
 
@@ -1025,6 +1041,11 @@ class Curl:
         new.resp = 503
         new.sentheaders = False
         new.suppress = False
+        new._stopped = False
+        new._negotiate_retried = False
+        new._ntlm_reconnect_rejected = False
+        new._ntlm_reconnect_retried = False
+        new._debug = False
         new.is_connect = False
         new.is_patch = False
         new.is_post = False
@@ -1154,6 +1175,12 @@ class Curl:
         codep = ffi.new("long *")
         libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_OS_ERRNO, codep)
         return codep[0]
+
+    def get_num_connects(self):
+        "Return (CURLcode, number of successful connections made for the transfer)"
+        connects = ffi.new("long *")
+        ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_NUM_CONNECTS, connects)
+        return ret, connects[0]
 
     def get_activesocket(self):
         "Return (CURLcode, socket_fd) for this handle's active connection"
@@ -1603,6 +1630,13 @@ class MCurl:
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
         while True:
+            if curl.proxy is not None and curl.auth is not None:
+                # CURLINFO_NUM_CONNECTS says only that a second successful
+                # connection existed. Keep libcurl's precise NTLM diagnostic
+                # too, so a normal close-and-restart handshake still counts.
+                curl._ntlm_reconnect_rejected = False
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_VERBOSE, py2cbool(True))
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
             if not curl.is_easy:
                 self.add(curl)
                 while True:
@@ -1674,6 +1708,7 @@ class MCurl:
             # and leaves the 407 of an intermediate leg in HTTP_CONNECTCODE (px#268).
             auth_failed = None
             retry_without_negotiate = False
+            retry_after_reconnect = False
             if curl.proxy is not None:
                 aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
                 ret, codep = curl.get_response()
@@ -1692,6 +1727,7 @@ class MCurl:
                         curl.errstr += "Truncated proxy response; "
                     elif curl.auth is not None:
                         ret_pa, proxyauth_used = curl.get_proxyauth_used()
+                        ret_nc, num_connects = curl.get_num_connects()
                         if (
                             not curl._negotiate_retried
                             and curl.auth & libcurl.CURLAUTH_NTLM
@@ -1709,6 +1745,22 @@ class MCurl:
                                 retry_without_negotiate = False
                                 curl.resp = 503
                                 curl.errstr += "Request body cannot be resent for NTLM retry; "
+                        elif (
+                            not curl._ntlm_reconnect_retried
+                            and ret_nc == libcurl.CURLE_OK
+                            and num_connects > 1
+                            and curl._ntlm_reconnect_rejected
+                        ):
+                            # NUM_CONNECTS counts successful connections only,
+                            # unlike failed happy-eyeballs addresses. The text
+                            # confirms libcurl resumed a connection-bound NTLM
+                            # handshake rather than starting one after a normal
+                            # Connection: close response.
+                            retry_after_reconnect = True
+                            if curl._content_length and curl._seek(0, 0) != libcurl.CURL_SEEKFUNC_OK:
+                                retry_after_reconnect = False
+                                curl.resp = 503
+                                curl.errstr += "Request body cannot be resent after NTLM reconnect; "
                         else:
                             # Proxy auth did not work for whatever reason
                             out = "Proxy authentication failed: "
@@ -1732,13 +1784,19 @@ class MCurl:
                     # Successful (or non‑auth) response – reset failure counter for this proxy
                     auth_failed = False
 
-            if retry_without_negotiate:
-                # Retry once with Negotiate removed from the mask so libcurl's
-                # next attempt picks NTLM instead; this attempt does not count.
-                dprint(curl.easyhash + ": Negotiate failed locally, retrying with NTLM")
-                curl._negotiate_retried = True
-                curl.auth &= ~libcurl.CURLAUTH_NEGOTIATE
-                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(curl.auth))
+            if retry_without_negotiate or retry_after_reconnect:
+                if retry_without_negotiate:
+                    # Retry once with Negotiate removed from the mask so libcurl's
+                    # next attempt picks NTLM instead; this attempt does not count.
+                    dprint(curl.easyhash + ": Negotiate failed locally, retrying with NTLM")
+                    curl._negotiate_retried = True
+                    curl.auth &= ~libcurl.CURLAUTH_NEGOTIATE
+                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(curl.auth))
+                else:
+                    dprint(curl.easyhash + ": NTLM resumed after reconnect, retrying on a fresh connection")
+                    curl._ntlm_reconnect_retried = True
+                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FRESH_CONNECT, py2cbool(True))
+                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FORBID_REUSE, py2cbool(True))
                 if not curl.is_easy:
                     with self._lock:
                         self._remove_handle(curl)
@@ -1752,6 +1810,9 @@ class MCurl:
                 curl.done = False
                 continue
 
+            if curl._ntlm_reconnect_retried:
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FRESH_CONNECT, py2cbool(False))
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FORBID_REUSE, py2cbool(False))
             if curl.proxy is not None:
                 self._record_proxy_auth(curl, auth_failed)
             break

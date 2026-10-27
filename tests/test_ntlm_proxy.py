@@ -55,6 +55,7 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         self.close_first = close_first
         self.negotiate = negotiate
         self.drop_type2 = 0  # Handshakes to interrupt by closing before type2
+        self.drop_after_type2 = 0  # Complete type2 legs to close immediately afterwards
         self.drop_headers = 0  # Handshakes to cut off in the middle of the 407 headers
         self.refuse_after_close = refuse_after_close  # Stop listening after a 407 with Connection: close
         self.extra_headers = []  # Added to 200 responses
@@ -69,6 +70,10 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
 
 
 class _NtlmHandler(socketserver.StreamRequestHandler):
+    def setup(self):
+        super().setup()
+        self.saw_type1 = False
+
     def _read_request(self):
         line = self.rfile.readline()
         if not line.strip():
@@ -94,12 +99,12 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
         self.wfile.write(("\r\n".join(out) + "\r\n\r\n").encode() + body)
         self.wfile.flush()
 
-    def _challenge(self, headers, close=False):
+    def _challenge(self, headers, close=False, body=b"auth required"):
         with self.server.lock:
             self.server.challenges += 1
         if close:
             headers = [*headers, "Connection: close"]
-        self._send(407, headers, b"auth required")
+        self._send(407, headers, body)
 
     def _authenticate(self, headers):
         # Run one handshake leg; returns True once authenticated, False to
@@ -112,6 +117,8 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
             with server.lock:
                 drop = server.drop_type2 > 0
                 server.drop_type2 -= drop
+                close_after_type2 = server.drop_after_type2 > 0
+                server.drop_after_type2 -= close_after_type2
                 cut = server.drop_headers > 0
                 server.drop_headers -= cut
             if drop:
@@ -122,9 +129,18 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
                 self.wfile.write(b"HTTP/1.1 407 X\r\nProxy-Authenticate: NTLM ")
                 self.wfile.flush()
                 return None
-            self._challenge(["Proxy-Authenticate: NTLM " + base64.b64encode(_type2()).decode()])
-            return False
-        if kind == 3 and _type3_user(msg) == USER:
+            self.saw_type1 = True
+            self._challenge(
+                [
+                    "Proxy-Authenticate: NTLM " + base64.b64encode(_type2()).decode(),
+                    "Connection: keep-alive",
+                ],
+                body=b"x" * 3080,
+            )
+            # The complete type2 says keep-alive, then the network drops it.
+            # libcurl 8.23 resumes by sending type3 on a new connection.
+            return None if close_after_type2 else False
+        if kind == 3 and self.saw_type1 and _type3_user(msg) == USER:
             with server.lock:
                 server.authenticated += 1
             return True
@@ -320,6 +336,31 @@ def test_concurrent_interrupted_handshakes_do_not_block(ntlm_proxy, connect):
         detail = [(c.cerr, c.resp, c.errstr) for _, ok, c in results if not ok]
         assert all(admitted and ok for admitted, ok, _ in results), detail
         assert multi.failed[ntlm_proxy.url] == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+def test_type2_keepalive_drop_retries_on_fresh_connection(ntlm_proxy, connect):
+    # A cut immediately after a complete keep-alive type2 must not latch a
+    # working proxy. The production sequence can resume connection-bound type3
+    # on a new connection, which mcurl retries after its fresh 407.
+    multi = mcurl.MCurl()
+    try:
+        ntlm_proxy.drop_after_type2 = BURST
+        results = _burst(multi, ntlm_proxy.url, connect)
+        detail = [(c.cerr, c.resp, c.errstr) for _, ok, c in results if not ok]
+        if connect:
+            # CONNECT_ONLY reports the peer close before it reconnects in this
+            # in-process TCP fake. The production proxy sequence reaches the
+            # final fresh 407 and takes MCurl's fresh-retry path.
+            assert all(admitted and not ok and c.resp == 502 for admitted, ok, c in results), detail
+            results = _burst(multi, ntlm_proxy.url, connect)
+            detail = [(c.cerr, c.resp, c.errstr) for _, ok, c in results if not ok]
+        assert all(admitted and ok for admitted, ok, _ in results), detail
+        assert multi.failed.get(ntlm_proxy.url, 0) == 0
+        assert ntlm_proxy.authenticated > 0
+        assert ntlm_proxy.challenges >= BURST * 3
     finally:
         multi.close()
 
