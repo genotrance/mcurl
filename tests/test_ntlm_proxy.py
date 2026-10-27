@@ -342,9 +342,9 @@ def test_concurrent_interrupted_handshakes_do_not_block(ntlm_proxy, connect):
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
 def test_type2_keepalive_drop_retries_on_fresh_connection(ntlm_proxy, connect):
-    # A cut immediately after a complete keep-alive type2 makes libcurl 8.23
-    # send type3 on a new connection. That connection-bound token gets a fresh
-    # 407, but mcurl retries once instead of counting it as a bad login.
+    # A cut immediately after a complete keep-alive type2 must not latch a
+    # working proxy. The production sequence can resume connection-bound type3
+    # on a new connection, which mcurl retries after its fresh 407.
     multi = mcurl.MCurl()
     try:
         ntlm_proxy.drop_after_type2 = BURST
@@ -353,7 +353,7 @@ def test_type2_keepalive_drop_retries_on_fresh_connection(ntlm_proxy, connect):
         if connect:
             # CONNECT_ONLY reports the peer close before it reconnects in this
             # in-process TCP fake. The production proxy sequence reaches the
-            # final fresh 407 and takes the retry path below.
+            # final fresh 407 and takes MCurl's fresh-retry path.
             assert all(admitted and not ok and c.resp == 502 for admitted, ok, c in results), detail
             results = _burst(multi, ntlm_proxy.url, connect)
             detail = [(c.cerr, c.resp, c.errstr) for _, ok, c in results if not ok]
