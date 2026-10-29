@@ -149,14 +149,19 @@ def _drive(curl, source, step=4000, delay=0.01):
     curl.resume_upload()
 
 
+BASIC_TOKEN = base64.b64encode(f"{USER}:pass".encode()).decode()
+
+
 class _Proxy(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, negotiate=False, ignore_expect=False):
+    def __init__(self, negotiate=False, ignore_expect=False, scheme="ntlm", close_after_response=False):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.negotiate = negotiate
         self.ignore_expect = ignore_expect
+        self.scheme = scheme
+        self.close_after_response = close_after_response
         self.lock = threading.Lock()
         self.legs = []  # (kind, method, headers, body bytes received) per 407 leg
         self.bodies = []  # (method, length, sha256, headers) after authentication
@@ -230,6 +235,12 @@ class _Handler(socketserver.StreamRequestHandler):
             self.server.legs.append((kind, method, headers, received))
 
     def handle(self):
+        if self.server.scheme == "basic":
+            self._handle_basic()
+        else:
+            self._handle_ntlm()
+
+    def _handle_ntlm(self):
         server = self.server
         saw_type1 = False
         authenticated = False  # NTLM authenticates the connection
@@ -250,8 +261,13 @@ class _Handler(socketserver.StreamRequestHandler):
                 with server.lock:
                     server.bodies.append((method, length, digest, headers))
                 self._send(200, [], b"ok")
+                if server.close_after_response:
+                    return
                 continue
             if kind == 1:
+                # NTLM is connection-bound: closing here would abort the
+                # handshake itself, not just end an already-completed
+                # request, so close_after_response does not apply mid-handshake
                 length, _ = self._read_body(headers)
                 self._record("type1", method, headers, length)
                 saw_type1 = True
@@ -270,6 +286,42 @@ class _Handler(socketserver.StreamRequestHandler):
             length, _ = self._read_body(headers)
             self._record("probe", method, headers, length)
             self._send(407, offers)
+            if server.close_after_response:
+                return
+
+    def _handle_basic(self):
+        # Basic carries no connection-level state, so a Squid fronting it can
+        # keep the connection alive across the probe, the retry and later
+        # requests alike; close_after_response forces a fresh connection (and
+        # a fresh 407 probe) for every single request instead.
+        server = self.server
+        while True:
+            method, headers = self._read_head()
+            if method is None:
+                return
+            expect = headers.get("expect", "").lower() == "100-continue"
+            scheme, _, token = headers.get("proxy-authorization", "").partition(" ")
+            if scheme.upper() == "BASIC" and token == BASIC_TOKEN:
+                if expect:
+                    self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    self.wfile.flush()
+                length, digest = self._read_body(headers)
+                with server.lock:
+                    server.bodies.append((method, length, digest, headers))
+                self._send(200, [], b"ok")
+                if server.close_after_response:
+                    return
+                continue
+            # Unauthenticated probe
+            if expect and not server.ignore_expect:
+                self._record("probe", method, headers, self._pending_bytes())
+                self._send(407, ['Proxy-Authenticate: Basic realm="px"'])
+            else:
+                length, _ = self._read_body(headers)
+                self._record("probe", method, headers, length)
+                self._send(407, ['Proxy-Authenticate: Basic realm="px"'])
+            if server.close_after_response:
+                return
 
 
 @pytest.fixture
@@ -346,9 +398,14 @@ def test_known_ntlm_uses_cl0_type1(proxy, multi, method, length):
     type1 = [leg for leg in proxy.legs if leg[0] == "type1"]
     assert type1 and all(leg[3] == 0 for leg in type1)
     if length:
-        # libcurl sends a Content-Length: 0 type1 itself; no Expect round trip
+        # libcurl sends a Content-Length: 0 type1 itself regardless of Expect.
+        # mcurl still adds Expect: 100-continue even for a known, connection-bound
+        # method: on a connection libcurl believes is already authenticated (a
+        # reused pooled one, possibly already closed by the proxy) it skips this
+        # safe type1 probe and sends the real request immediately, so only Expect
+        # protects a non-seekable body if that belief turns out to be wrong
         assert type1[0][2].get("content-length") == "0"
-        assert "expect" not in proxy.bodies[0][3]
+        assert proxy.bodies[0][3].get("expect", "").lower() == "100-continue"
     assert not [leg for leg in proxy.legs if leg[0] == "probe"]
 
 
@@ -373,6 +430,82 @@ def test_second_upload_starts_with_cached_ntlm(proxy, multi):
     assert ok, (curl.cerr, curl.resp, curl.errstr)
     # Reuses the authenticated connection, or starts with type1 on a new one
     assert [leg[0] for leg in proxy.legs] in ([], ["type1"])
+
+
+# px gives each client connection its own thread, sharing one MCurl/MCURL.proxyauth
+# (one ThreadPoolExecutor task per connection). A second connection's set_auth() can
+# run while an earlier connection's upload is still in flight, with the earlier one's
+# proxy-auth cache write landing in between that set_auth() call and the second
+# connection's actual network leg. That used to make _prepare_expect() suppress
+# Expect: 100-continue for a handle that still had the broad, unresolved auth mask
+# configured via CURLOPT_PROXYAUTH, so libcurl sent the whole body on the
+# unauthenticated probe leg and a non-seekable source could not resend it after the
+# 407 (CURLE_SEND_FAIL_REWIND / curl error 65). px's lab (task T59f5c606) needed a 1s
+# sleep between a warm-up upload and the next one to avoid this for exactly these two
+# proxy kinds; see docs/api.md.
+RACE_PROXIES = [
+    pytest.param({"scheme": "basic"}, "ANY", id="basic-any-keepalive"),
+    pytest.param({"close_after_response": True}, "NONEGOTIATE", id="ntlm-unknown-close"),
+]
+
+
+@pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
+@pytest.mark.parametrize("proxy, auth", RACE_PROXIES, indirect=["proxy"])
+def test_upload_after_concurrent_cache_write_does_not_rewind(proxy, multi, auth, easy):
+    # The second handle's auth is captured before anything is cached, mirroring a
+    # connection whose set_auth() ran before an in-flight sibling connection's
+    # response (and cache write) landed.
+    second = mcurl.Curl(TARGET, method="POST")
+    second.is_easy = easy
+    assert second.set_proxy(proxy.url)
+    second.set_auth(USER, "pass", auth=auth)
+    assert proxy.url not in multi.proxyauth
+
+    # The first upload completes and caches the method behind the second handle's back.
+    ok, first = _upload(multi, proxy, "POST", StreamSource(100), 100, auth=auth, easy=easy)
+    assert ok and first.cerr == 0, (first.cerr, first.resp, first.errstr)
+    assert proxy.url in multi.proxyauth
+
+    # The second upload's network leg only starts now, well after the cache was
+    # populated; it must still add Expect: 100-continue rather than trust a cache
+    # read that disagrees with what CURLOPT_PROXYAUTH was actually set to.
+    source = StreamSource(100)
+    second.bridge(source, io.BytesIO(), io.BytesIO())
+    second.set_headers({"Content-Type": "application/octet-stream", "Content-Length": "100"})
+    ok2 = multi.do(second)
+    assert ok2 and second.cerr == 0 and second.get_response()[1] == 200, (second.cerr, second.resp, second.errstr)
+    source.assert_read_once()
+
+
+@pytest.mark.parametrize("proxy, auth", RACE_PROXIES, indirect=["proxy"])
+def test_concurrent_back_to_back_uploads_do_not_rewind(proxy, multi, auth):
+    # Real back-to-back uploads with no settle delay, from two threads sharing one
+    # MCurl, as two px connection workers would: stress the actual race window
+    # instead of only the deterministic ordering above.
+    errors = []
+
+    def one():
+        ok, curl = _upload(multi, proxy, "POST", StreamSource(100), 100, auth=auth)
+        if not (ok and curl.cerr == 0 and curl.get_response()[1] == 200):
+            errors.append((curl.cerr, curl.resp, curl.errstr))
+
+    for _ in range(20):
+        multi.proxyauth.pop(proxy.url, None)
+        del proxy.legs[:]
+        del proxy.bodies[:]
+        first = threading.Thread(target=one)
+        second = threading.Thread(target=one)
+        first.start()
+        # A tiny head start keeps the second connection's set_auth() seeing
+        # "unknown", like a sibling connection that started just slightly
+        # later but whose own response can still race the first one's cache write
+        first.join(0.01)
+        second.start()
+        first.join(5)
+        second.join(5)
+        assert not first.is_alive() and not second.is_alive()
+
+    assert not errors, errors
 
 
 def test_large_streamed_body_bounded_memory(proxy, multi):
