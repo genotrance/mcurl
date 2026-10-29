@@ -1,6 +1,7 @@
 """Manage outbound HTTP connections using Curl & CurlMulti"""
 
 import collections
+import contextlib
 import io
 import os.path
 import platform
@@ -210,10 +211,20 @@ def read_callback(buffer, size, nitems, userdata):
     if tsize > 0:
         if curl.client_rfile is not None:
             try:
-                data = curl.client_rfile.read(tsize) or b""
+                data = curl.client_rfile.read(tsize)
+            except BlockingIOError:
+                # No data yet; pause sending and resume once the source has some
+                dprint(curl.easyhash + ": Read would block, pausing")
+                curl._pause_mask |= libcurl.CURLPAUSE_SEND
+                return libcurl.CURL_READFUNC_PAUSE
             except ConnectionError as exc:
                 dprint(curl.easyhash + ": Error reading from client: " + str(exc))
                 data = b""
+            if data is None:
+                # No data yet; pause sending and resume once the source has some
+                dprint(curl.easyhash + ": Read would block, pausing")
+                curl._pause_mask |= libcurl.CURLPAUSE_SEND
+                return libcurl.CURL_READFUNC_PAUSE
             # read() may return fewer bytes than asked for
             tsize = min(len(data), tsize)
             ffi.memmove(buffer, data, tsize)
@@ -236,10 +247,21 @@ def write_callback(buffer, size, nitems, userdata):
         if curl.sentheaders:
             if curl.client_wfile is not None:
                 try:
-                    tsize = curl.client_wfile.write(ffi.buffer(buffer, tsize))
+                    written = curl.client_wfile.write(ffi.buffer(buffer, tsize))
+                except BlockingIOError:
+                    # Downstream not ready; pause receiving and resume once it is
+                    dprint(curl.easyhash + ": Write would block, pausing")
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    return libcurl.CURL_WRITEFUNC_PAUSE
                 except ConnectionError as exc:
                     dprint(curl.easyhash + ": Error writing to client: " + str(exc))
                     return 0
+                if written is None:
+                    # Downstream not ready; pause receiving and resume once it is
+                    dprint(curl.easyhash + ": Write would block, pausing")
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    return libcurl.CURL_WRITEFUNC_PAUSE
+                tsize = written
             else:
                 dprint(curl.easyhash + ": Ignored %d bytes" % tsize)
                 return tsize
@@ -325,6 +347,8 @@ class Curl:
     _body_read = 0
     # Expect header still to be chosen by _prepare_expect()
     _expect_pending = False
+    # CURLPAUSE_SEND/CURLPAUSE_RECV bits currently paused on this handle
+    _pause_mask = 0
 
     # For plain HTTP
     client_rfile = None
@@ -526,6 +550,7 @@ class Curl:
         self._chunked = False
         self._body_read = 0
         self._expect_pending = False
+        self._pause_mask = 0
         self.user = None
         self.xheaders = None
         self._keepalive = []
@@ -1174,6 +1199,26 @@ class Curl:
         "Resume all paused transfers on this handle"
         return libcurl.curl_easy_pause(self.easy, libcurl.CURLPAUSE_CONT)
 
+    def resume_upload(self):
+        """Thread-safe: resume a request body paused by read_callback returning CURL_READFUNC_PAUSE.
+
+        Call this from any thread once client_rfile.read() has more data (or
+        EOF) to give; see bridge() in the Streamed request bodies docs for the
+        non-blocking read() contract. Only meaningful for a handle driven
+        through MCurl.do()/add() (the multi interface).
+        """
+        if MCURL is not None:
+            MCURL.resume(self, libcurl.CURLPAUSE_SEND)
+
+    def resume_download(self):
+        """Thread-safe: resume a response paused by write_callback returning CURL_WRITEFUNC_PAUSE.
+
+        Call this from any thread once client_wfile.write() can accept more
+        data. Only meaningful for a handle driven through MCurl.do()/add().
+        """
+        if MCURL is not None:
+            MCURL.resume(self, libcurl.CURLPAUSE_RECV)
+
     # Transfer progress callback (section 12)
 
     def set_xferinfo(self, callback):
@@ -1503,6 +1548,15 @@ class MCurl:
         self._blocked = {}  # proxy -> (blocked since monotonic time, interval)
         self._probe = {}  # proxy -> easyhash of in-flight probe
 
+        # resume() from a foreign thread only queues; the thread driving the
+        # multi handle under self._lock is the only one allowed to call
+        # curl_easy_pause(). _wake_w interrupts a select() blocked on sockets.
+        self._resume_lock = threading.Lock()
+        self._pending_resume = {}  # easyhash -> CURLPAUSE_* bits to clear
+        self._wake_r, self._wake_w = socket.socketpair()
+        self._wake_r.setblocking(False)
+        self._wake_w.setblocking(False)
+
     def setopt(self, option, value):
         "Configure a multi option (socket/timer callbacks are reserved by mcurl)"
         if option in (libcurl.CURLMOPT_SOCKETFUNCTION, libcurl.CURLMOPT_TIMERFUNCTION):
@@ -1638,6 +1692,46 @@ class MCurl:
                 if msg.data.result != libcurl.CURLE_OK:
                     curl.cerr = msg.data.result
 
+    def resume(self, curl: Curl, bitmask=None):
+        """Thread-safe: queue curl to resume a paused direction, from any thread.
+
+        bitmask is the CURLPAUSE_SEND and/or CURLPAUSE_RECV bits to clear;
+        None clears both. curl_easy_pause() itself is only ever called by the
+        thread currently driving the multi handle inside _perform(), while it
+        holds self._lock, so a resume request here only records the request
+        and wakes that thread instead of calling it directly.
+        """
+        if bitmask is None:
+            bitmask = libcurl.CURLPAUSE_ALL
+        with self._resume_lock:
+            self._pending_resume[curl.easyhash] = self._pending_resume.get(curl.easyhash, 0) | bitmask
+        self._wake()
+
+    def _wake(self):
+        # Interrupt a select() blocked waiting for socket activity
+        with contextlib.suppress(BlockingIOError, OSError):
+            self._wake_w.send(b"\x00")
+
+    def _drain_wake(self):
+        with contextlib.suppress(BlockingIOError, OSError):
+            while self._wake_r.recv(4096):
+                pass
+
+    def _apply_pending_resumes(self):
+        # Call curl_easy_pause() for every queued resume; must hold self._lock
+        if len(self._pending_resume) == 0:
+            return False
+        with self._resume_lock:
+            pending = self._pending_resume
+            self._pending_resume = {}
+        for easyhash, clear_bits in pending.items():
+            curl = self.handles.get(easyhash)
+            if curl is None:
+                continue
+            curl._pause_mask &= ~clear_bits
+            libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
+        return True
+
     # Adding to multi
 
     def _add_handle(self, curl: Curl):
@@ -1709,10 +1803,12 @@ class MCurl:
         rready, wready, xready = [], [], []
         if len(rsnap) != 0 or len(wsnap) != 0:
             # Cap only waits on sockets, which activity can interrupt; with no
-            # sockets and no timer, sleeping would stall every caller of do()
+            # sockets and no timer, sleeping would stall every caller of do().
+            # _wake_r is always included so resume() from another thread cuts
+            # this wait short instead of waiting out the timer/select cap.
             wait = MULTI_SELECT_TIMEOUT if timer is None else timer
             try:
-                rready, wready, xready = select.select(rsnap, wsnap, list(rsnap_set | wsnap_set), wait)
+                rready, wready, xready = select.select([*rsnap, self._wake_r], wsnap, list(rsnap_set | wsnap_set), wait)
             except OSError:
                 # Socket closed between snapshot and select()
                 return
@@ -1722,6 +1818,10 @@ class MCurl:
 
         # Process ready sockets under lock
         with self._lock:
+            if self._wake_r in rready:
+                rready.remove(self._wake_r)
+                self._drain_wake()
+            resumed = self._apply_pending_resumes()
             if len(rready) == 0 and len(wready) == 0 and len(xready) == 0:
                 # dprint("No activity")
                 self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
@@ -1735,6 +1835,10 @@ class MCurl:
                 for sock_fd in xready:
                     # dprint("Error sock_fd %d" % sock_fd)
                     self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
+                if resumed:
+                    # A resumed handle may have no socket activity of its own
+                    # this round; give it a chance to progress too
+                    self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
 
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
@@ -2079,6 +2183,8 @@ class MCurl:
             for curl in pending:
                 self._remove_handle(curl, errstr="Stopped")
             libcurl.curl_multi_cleanup(self._multi)
+        self._wake_r.close()
+        self._wake_w.close()
 
         global MCURL
         MCURL = None

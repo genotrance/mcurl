@@ -45,6 +45,12 @@
 
 ### New features
 - Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
+- `bridge()` body sources and response sinks can now be non-blocking: a
+  `client_rfile.read()`/`client_wfile.write()` that returns `None` (or raises
+  `BlockingIOError`) pauses the transfer instead of blocking, and
+  `Curl.resume_upload()`/`Curl.resume_download()` resume it from any thread.
+  One stalled or slow streaming client no longer stalls every other transfer
+  on the same `MCurl`.
 
 ### Internal
 - NTLM proxy tests gate on `CURL_VERSION_NTLM` rather than platform or
