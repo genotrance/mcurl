@@ -166,9 +166,11 @@ own suite does not catch everything a consumer depends on. px's HTTPS
 proxy-auth tests caught a regression in 8.23.0.1 that mcurl's suite did not.
 `build.yml` now makes px's Docker-backed corporate proxy scenario suite a
 release gate: it installs the Linux candidate wheel into px's `devel` checkout
-and runs the suite in every release and dry run. Ordinary pull requests do not
-need this run, but changes to proxy authentication, auth retry, or timeouts
-should be called out in the PR.
+and runs the suite in every release and dry run. It selects all `scenario`
+tests in px, so the px upload scenarios (POST/PUT/PATCH through the NTLM and
+Negotiate/Kerberos Squid proxies) are covered once px adds them. Ordinary pull
+requests do not need this run, but changes to proxy authentication, auth retry,
+or timeouts should be called out in the PR.
 
 ### Local reproduction
 

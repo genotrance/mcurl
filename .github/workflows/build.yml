@@ -182,12 +182,33 @@ jobs:
         env:
           PX_REQUIRE_MCURL_FIX: "1"
           PX_SCENARIO_ENV: start
-        run: uv run --locked --no-sync python -m pytest tests/scenarios -m scenario -v
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "${{ runner.temp }}/px-scenario-artifacts"
+          uv run --locked --no-sync python -m pytest tests/scenarios -m scenario -v \
+            --basetemp="${{ runner.temp }}/px-scenario-tmp" 2>&1 | tee "${{ runner.temp }}/px-scenario-artifacts/pytest.log"
+
+      - name: Collect px scenario logs
+        if: failure()
+        working-directory: px
+        run: |
+          tests/scenarios/env/scenario-env.sh logs > "${{ runner.temp }}/px-scenario-artifacts/compose.log" 2>&1 || true
+          find "${{ runner.temp }}/px-scenario-tmp" -name 'px-*.log' \
+            -exec cp {} "${{ runner.temp }}/px-scenario-artifacts/" \; 2>/dev/null || true
+
+      - name: Upload px scenario logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: px-scenario-logs
+          path: ${{ runner.temp }}/px-scenario-artifacts
+          retention-days: 7
 
       - name: Clean up px scenario environment
         if: always()
         working-directory: px
-        run: tools/scenario-env.sh down
+        run: tests/scenarios/env/scenario-env.sh down
 
   publish:
     needs: [setup, build-sdist, build-wheels, px-scenarios]
