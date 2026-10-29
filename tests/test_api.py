@@ -380,6 +380,40 @@ def test_pause_unpause():
     assert isinstance(ret, int)
 
 
+def test_resume_upload_download_no_multi():
+    # Thread-safe no-op without an active multi handle, same as pause/unpause above
+    ec = mcurl.Curl("http://example.com")
+    ec.resume_upload()
+    ec.resume_download()
+
+
+def test_mcurl_resume_applies_pause_mask():
+    # resume() queues the clear-bits and _apply_pending_resumes() (called by
+    # the thread driving the multi handle, under _lock) clears them and calls
+    # curl_easy_pause(); see Non-blocking bridge() sources in docs/api.md
+    multi = mcurl.MCurl()
+    try:
+        ec = mcurl.Curl("http://example.com")
+        multi.add(ec)
+        ec._pause_mask = mcurl.libcurl.CURLPAUSE_SEND | mcurl.libcurl.CURLPAUSE_RECV
+        multi.resume(ec, mcurl.libcurl.CURLPAUSE_SEND)
+        with multi._lock:
+            assert multi._apply_pending_resumes() is True
+        assert ec._pause_mask == mcurl.libcurl.CURLPAUSE_RECV
+
+        # None clears every paused direction
+        multi.resume(ec)
+        with multi._lock:
+            assert multi._apply_pending_resumes() is True
+        assert ec._pause_mask == 0
+
+        # Nothing queued: no-op
+        with multi._lock:
+            assert multi._apply_pending_resumes() is False
+    finally:
+        multi.close()
+
+
 # Section 12: xferinfo callback
 
 

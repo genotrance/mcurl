@@ -20,6 +20,7 @@ import socketserver
 import struct
 import sys
 import threading
+import time
 import tracemalloc
 
 import pytest
@@ -83,6 +84,69 @@ class StreamSource:
             assert start == offset, "source read out of order or twice"
             offset += length
         assert offset == self.length
+
+
+class PausingStreamSource:
+    """Non-seekable body source that pauses (read() returns None) instead of blocking.
+
+    release(n) makes the next n bytes (cumulatively, from the same PATTERN
+    generator as StreamSource) available; until then read_callback gets None
+    and returns CURL_READFUNC_PAUSE. The caller resumes with
+    curl.resume_upload() from any thread, mirroring px's streaming RequestBody
+    whose read() never blocks the mcurl thread.
+    """
+
+    def __init__(self, length):
+        self.length = length
+        self.pos = 0
+        self.available = 0
+        self.pause_count = 0
+        self.reads = []
+        self.sha = hashlib.sha256()
+        self._lock = threading.Lock()
+        # Set on the first pause so a driver thread can block efficiently
+        # instead of spin-polling, which matters with dozens running at once
+        self.paused = threading.Event()
+
+    def release(self, nbytes):
+        with self._lock:
+            self.available = min(self.length, self.available + nbytes)
+
+    def read(self, size=-1):
+        if size < 0:
+            size = self.length - self.pos
+        with self._lock:
+            avail = self.available - self.pos
+        if avail <= 0:
+            if self.pos >= self.length:
+                return b""
+            self.pause_count += 1
+            self.paused.set()
+            return None
+        size = min(size, avail)
+        start = self.pos % len(PATTERN)
+        data = (PATTERN[start:] + PATTERN[:start]) * (size // len(PATTERN) + 1)
+        data = data[:size]
+        self.reads.append((self.pos, len(data)))
+        self.sha.update(data)
+        self.pos += len(data)
+        return data
+
+    def seekable(self):
+        return False
+
+
+def _drive(curl, source, step=4000, delay=0.01):
+    "Trickle-feed a PausingStreamSource and wake mcurl, as a slow client would"
+    # Wait for the first real pause so the handshake/probe legs (which need no
+    # body) don't let the driver race ahead and release everything up front.
+    # A blocking wait (not polling) matters once dozens of these run at once.
+    source.paused.wait(30)
+    while source.available < source.length:
+        time.sleep(delay)
+        source.release(step)
+        curl.resume_upload()
+    curl.resume_upload()
 
 
 class _Proxy(socketserver.ThreadingTCPServer):
@@ -342,6 +406,64 @@ def test_proxy_ignoring_expect_gives_clear_error(proxy, multi):
     assert mcurl.MCURL.proxyauth.get(proxy.url) == mcurl.libcurl.CURLAUTH_NTLM
     ok, curl = _upload(multi, proxy, "POST", StreamSource(5000), 5000)
     assert ok, (curl.cerr, curl.resp, curl.errstr)
+
+
+def test_unknown_auth_streamed_body_pausing_source(proxy, multi):
+    # Same Expect: 100-continue probe path as test_unknown_auth_streamed_body,
+    # but the source pauses (CURL_READFUNC_PAUSE) instead of being ready
+    # immediately, and is fed and resumed from a second thread
+    length = 20000
+    source = PausingStreamSource(length)
+    curl = mcurl.Curl(TARGET, method="POST")
+    assert curl.set_proxy(proxy.url)
+    curl.set_auth(USER, "pass", auth="ANY")
+    curl.bridge(source, io.BytesIO(), io.BytesIO())
+    curl.set_headers({"Content-Type": "application/octet-stream", "Content-Length": str(length)})
+    driver = threading.Thread(target=_drive, args=(curl, source), kwargs={"step": 4000, "delay": 0.01})
+    driver.start()
+    ok = multi.do(curl)
+    driver.join(5)
+    assert ok and curl.cerr == 0 and curl.get_response()[1] == 200, (curl.cerr, curl.resp, curl.errstr)
+    assert source.pause_count >= 1
+    assert [(m, n, d) for m, n, d, _ in proxy.bodies] == [("POST", length, _expected(length))]
+    probes = [leg for leg in proxy.legs if leg[0] == "probe"]
+    assert probes and all(received == 0 for *_, received in probes)
+    assert probes[0][2].get("expect", "").lower() == "100-continue"
+
+
+@pytest.mark.slow
+def test_concurrent_paused_uploads_deliver_exact_bodies(proxy, multi):
+    # One stalled read must not serialize the others: 60 uploads, each paused
+    # and fed from its own thread, must all complete through the same proxy
+    n = 60
+    length = 20000
+    expected_sha = _expected(length)
+    results = [None] * n
+
+    def one(i):
+        source = PausingStreamSource(length)
+        curl = mcurl.Curl(TARGET, method="POST")
+        assert curl.set_proxy(proxy.url)
+        curl.set_auth(USER, "pass", auth="ANY")
+        curl.bridge(source, io.BytesIO(), io.BytesIO())
+        curl.set_headers({"Content-Type": "application/octet-stream", "Content-Length": str(length)})
+        driver = threading.Thread(target=_drive, args=(curl, source), kwargs={"step": 2000, "delay": 0.005})
+        driver.start()
+        ok = multi.do(curl)
+        driver.join(20)
+        results[i] = (ok, curl, source)
+
+    workers = [threading.Thread(target=one, args=(i,)) for i in range(n)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(45)
+
+    for ok, curl, source in results:
+        assert ok and curl.cerr == 0 and curl.get_response()[1] == 200, (curl.cerr, curl.resp, curl.errstr)
+        assert source.pause_count >= 1
+    bodies = sorted((bn, d) for _, bn, d, _ in proxy.bodies)
+    assert bodies == sorted([(length, expected_sha)] * n)
 
 
 def test_rewind_only_when_nothing_read():

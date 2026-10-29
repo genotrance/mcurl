@@ -106,7 +106,7 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `buffer(data=None)` | Setup BytesIO buffers for `perform()`; pass `data` for upload (POST/PUT) bodies |
-| `bridge(client_rfile, client_wfile, client_hfile)` | Bridge curl reads/writes to file-like objects. The request body is streamed from `client_rfile` once, never buffered; `client_rfile` only needs `read()` (a `seekable()`/`seek()` source can be rewound). Call `set_headers()` afterwards with `Content-Length`, or `Transfer-Encoding: chunked` for an unknown length. See [Streamed request bodies](#streamed-request-bodies) |
+| `bridge(client_rfile, client_wfile, client_hfile)` | Bridge curl reads/writes to file-like objects. The request body is streamed from `client_rfile` once, never buffered; `client_rfile` only needs `read()` (a `seekable()`/`seek()` source can be rewound), and may be non-blocking - see [Non-blocking bridge() sources](#non-blocking-bridge-sources). Call `set_headers()` afterwards with `Content-Length`, or `Transfer-Encoding: chunked` for an unknown length. See [Streamed request bodies](#streamed-request-bodies) |
 | `set_transfer_decoding(enable=False)` | Control transfer decoding (chunked, gzip); disable to let the client handle it |
 | `get_data(encoding="utf-8")` | Return response body from `buffer()` |
 | `get_headers(encoding="utf-8")` | Return response headers from `buffer()` |
@@ -182,6 +182,8 @@ with automatic Python-to-C type conversion.
 | `dup(url=None)` | Clone this handle into a new `Curl` instance with all libcurl options preserved - useful for template-based workflows |
 | `pause(bitmask)` | Pause send/receive on the handle |
 | `unpause()` | Resume all paused transfers |
+| `resume_upload()` | Thread-safe: resume a request body paused by a `bridge()` read source returning `CURL_READFUNC_PAUSE`. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
+| `resume_download()` | Thread-safe: resume a response paused by a `bridge()` write sink returning `CURL_WRITEFUNC_PAUSE`. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 
 ### Context manager
 
@@ -316,6 +318,51 @@ Unsupported cases:
 - NTLM through a proxy that closes the connection after each response: NTLM
   is connection-bound and cannot complete, with or without a body.
 
+### Non-blocking bridge() sources
+
+`read_callback` and `write_callback` used to run `client_rfile.read()` and
+`client_wfile.write()` inside `_socket_action()` while `MCurl._lock` was held,
+so a `client_rfile` whose `read()` blocks waiting for more data from its own
+client (for example a streaming request body fed from a socket) froze every
+other transfer on the same `MCurl` for as long as that read took. `bridge()`
+sources and sinks can now be non-blocking instead:
+
+- `client_rfile.read(n)` returns `None`, or raises `BlockingIOError`, to mean
+  "no data yet" without blocking. mcurl returns `CURL_READFUNC_PAUSE` to
+  libcurl, which pauses sending on that handle; no bytes are read or buffered.
+  EOF is unchanged: an empty `bytes` return (`b""`) ends the body as before.
+- `client_wfile.write(buf)` returns `None`, or raises `BlockingIOError`, to
+  mean the downstream client cannot accept more right now. mcurl returns
+  `CURL_WRITEFUNC_PAUSE`; libcurl buffers that chunk internally (not mcurl)
+  and redelivers it to `write_callback` once resumed.
+- Resume from any thread with `curl.resume_upload()` (clears the paused read
+  direction) or `curl.resume_download()` (clears the paused write direction),
+  or the lower-level `MCurl.resume(curl, bitmask=None)` (`bitmask` is
+  `CURLPAUSE_SEND` and/or `CURLPAUSE_RECV`; `None` clears both). `curl_easy_pause()`
+  itself is only ever called by the thread currently driving the multi handle
+  inside `_perform()`, while it holds `MCurl._lock`, since libcurl documents
+  it as unsafe to call concurrently with a running transfer; `resume()` from
+  any other thread only records the request and wakes that thread (an
+  internal `socketpair()`, not `curl_multi_wakeup()`, since mcurl polls
+  sockets with `select()` directly rather than through `curl_multi_poll()`),
+  so a resume does not wait out the current `select()` timeout.
+- A handle that is paused indefinitely still honours `CURLOPT_TIMEOUT` /
+  `set_timeout()` (the timer that drives it is independent of pause state) and
+  is removed cleanly by `remove()`/`stop()`; neither waits for the source. A
+  source that fails while paused never gets another callback until resumed or
+  removed, so the caller ends the transfer itself (`stop()`) once it knows the
+  source failed, rather than it hanging forever.
+- Only meaningful with the multi interface (`MCurl.do()`/`add()`); pausing a
+  handle run through the easy interface (`Curl.perform()`, `is_easy=True`)
+  blocks the calling thread with no event loop to resume it from, so a
+  non-blocking source should not be used that way.
+- Remaining limit: a resume is only guaranteed to cut short an in-progress
+  `select()` wait on that handle's own sockets. A handle with no socket
+  registered yet (the brief window before it connects) and a pending libcurl
+  timer falls back to a plain `time.sleep()` that a resume does not
+  interrupt; this never applies to an already-connected, paused upload or
+  download, which always has a registered socket.
+
 ### Static methods
 
 | Method | Description |
@@ -334,6 +381,7 @@ Unsupported cases:
 | `do(curl)` | Add a `Curl` handle and perform until completion; returns `True` on success |
 | `remove(curl)` | Remove a completed `Curl` handle from the multi instance |
 | `stop(curl)` | Abort a running `Curl` handle and remove it from the multi instance |
+| `resume(curl, bitmask=None)` | Thread-safe: queue `curl` to resume a paused direction (`CURLPAUSE_SEND` and/or `CURLPAUSE_RECV`; `None` clears both) and wake the thread driving the multi handle. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 | `select(curl, client_sock, idle=30)` | Run a bidirectional select loop between a client socket and a CONNECT tunnel |
 | `close()` | Stop all running transfers and close the multi handle |
 
