@@ -296,6 +296,11 @@ def header_callback(buffer, size, nitems, userdata):
                 # Done sending headers
                 dprint(curl.easyhash + ": Done sending headers")
                 curl.sentheaders = True
+                # Cache the proxy auth method now, before write_callback can
+                # hand any response byte to client_wfile: a client fast enough
+                # to react to that first byte must never see a request for the
+                # same proxy still treat the method as unknown (px#T59f5c606)
+                curl._cache_proxy_auth()
             elif curl.auth is not None and _is_407_status_line(data):
                 # HTTP status line with status code 407 (issue #148)
                 # Px is configured to authenticate so don't send auth related
@@ -688,12 +693,30 @@ class Curl:
         Pick the Expect header for a known-length body just before the transfer.
 
         A streamed body that cannot rewind must not go out on a proxy auth leg
-        that ends in 407. libcurl itself sends a Content-Length: 0 probe once
-        NTLM or Digest is picked, and Basic is preemptive, so "Expect:" stays
-        suppressed for those. When the method is not known yet (several bits
-        such as ANY) or is Negotiate (whose token leg always carries the body,
-        and SSPI SPNEGO can need more legs), "Expect: 100-continue" makes
-        libcurl hold the body until the proxy answers.
+        that ends in 407, or on a connection libcurl believed was still good
+        and was not. Basic is preemptive and stateless - every request carries
+        full credentials regardless of the connection, so a dead pooled
+        connection just fails the whole request cleanly - and stays exempt.
+        Every other case keeps "Expect: 100-continue": when the method is not
+        known yet (several bits such as ANY), when it is Negotiate (whose
+        token leg always carries the body, and SSPI SPNEGO can need more
+        legs), and also when it is a known NTLM or Digest - connection-bound
+        methods for which libcurl, on a connection it believes is already
+        authenticated, skips the safe Content-Length: 0 probe and sends the
+        real request immediately. mcurl cannot tell from here whether this
+        handle will reuse a pooled connection or open a fresh one, and a
+        proxy that does not keep connections alive after each response (or
+        one that simply let a pooled one go idle and die) turns that belief
+        into a body sent on a connection that was already gone, which cannot
+        be told apart from a 407 until libcurl tries to read the reply.
+
+        The decision must use self.auth, exactly what set_auth() configured
+        via CURLOPT_PROXYAUTH, rather than re-reading MCURL.proxyauth here: a
+        concurrent request for the same proxy can cache the method in the gap
+        between this handle's set_auth() and this call, which would make this
+        check see a single resolved method while the handle itself still has
+        the broader, unresolved mask installed - concluding Expect can be
+        suppressed when libcurl was never told to narrow its own behaviour.
         """
         if not self._expect_pending:
             return
@@ -705,15 +728,9 @@ class Curl:
             and not self.is_connect
             and self.client_rfile is not None
             and not self._can_rewind()
+            and self.auth != libcurl.CURLAUTH_BASIC
         ):
-            auth = (MCURL.proxyauth.get(self.proxy) if MCURL is not None else None) or self.auth
-            if auth not in (
-                libcurl.CURLAUTH_NTLM,
-                libcurl.CURLAUTH_DIGEST,
-                libcurl.CURLAUTH_DIGEST_IE,
-                libcurl.CURLAUTH_BASIC,
-            ):
-                line = "Expect: 100-continue"
+            line = "Expect: 100-continue"
         dprint(self.easyhash + ": Adding header => " + line)
         self.headers = libcurl.curl_slist_append(self.headers, py2cstr(line))
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPHEADER, self.headers)
@@ -1385,10 +1402,22 @@ class Curl:
             val = val.decode(encoding)
         return val
 
+    def _cache_proxy_auth(self):
+        "Cache the proxy auth method libcurl just reported, if not already cached"
+        if self.auth is None or self.proxy is None or self.proxy in MCURL.proxyauth:
+            return
+        ret, proxyauth_used = self.get_proxyauth_used()
+        if ret == libcurl.CURLE_OK and proxyauth_used != 0:
+            MCURL.proxyauth[self.proxy] = proxyauth_used
+            self.auth = proxyauth_used
+            dprint(f"{self.easyhash}: Caching proxy auth method: {self.proxy} {proxyauth_used}")
+
     def _save_auth(self):
-        "Find and cache proxy auth method used by libcurl"
+        "Find and cache proxy auth method used by libcurl, as a fallback for header_callback"
         # A failed rewind still learned the method on the probe leg: cache it
-        # so the next upload starts the handshake upfront
+        # so the next upload starts the handshake upfront. header_callback
+        # cannot do this itself since a rewind failure is only detected after
+        # headers complete, when libcurl tries and fails to resend the body.
         rewind_failed = self.cerr == libcurl.CURLE_SEND_FAIL_REWIND
         if self.auth is None or (self.cerr != libcurl.CURLE_OK and not rewind_failed):
             # No need to check auth
@@ -1407,17 +1436,7 @@ class Curl:
             dprint(f"{self.easyhash}: Not caching proxy auth method: response {code}")
             return
 
-        ret, proxyauth_used = self.get_proxyauth_used()
-        if ret == libcurl.CURLE_OK:
-            if proxyauth_used != 0:
-                # Cache auth mthod used by libcurl
-                MCURL.proxyauth[self.proxy] = proxyauth_used
-                self.auth = proxyauth_used
-                dprint(f"{self.easyhash}: Caching proxy auth method: {self.proxy} {proxyauth_used}")
-            else:
-                dprint(f"Proxy auth method not yet used: {self.auth}")
-        else:
-            dprint(f"Failed to get proxy auth method: {ret}")
+        self._cache_proxy_auth()
 
 
 @ffi.def_extern()

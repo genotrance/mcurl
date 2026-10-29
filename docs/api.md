@@ -292,10 +292,20 @@ leg that can succeed:
   byte. libcurl then closes that probe connection (one extra TCP connection)
   and retries with the picked method. The picked method is cached even if
   the request later fails, so the next upload starts the handshake upfront.
-- Known NTLM or Digest: libcurl sends the first leg with `Content-Length: 0`
-  and the body only on the final leg, and Basic is preemptive, so mcurl keeps
-  suppressing `Expect` and no extra round trip is paid. Authenticated
-  keep-alive connections are reused as before.
+- Known NTLM or Digest: on a fresh connection libcurl sends the first leg
+  with `Content-Length: 0` and the body only on the final leg. But mcurl
+  cannot tell from here whether this request will reuse a pooled connection
+  or open a fresh one, and on a connection libcurl believes is already
+  authenticated it skips that safe probe and sends the real request, body
+  included, right away. A proxy that does not keep connections alive after
+  each response - or one that simply let a pooled connection go idle and die
+  - turns that belief into a body sent on a connection that was already gone;
+  libcurl cannot tell this apart from a 407 until it tries to read the reply.
+  mcurl therefore keeps sending `Expect: 100-continue` for these too, paying
+  one extra round trip per request so a dead connection is caught before the
+  body goes out. Basic stays exempt: it is preemptive and stateless, so every
+  request carries full credentials regardless of the connection, and a dead
+  pooled connection just fails outright instead of eating the body.
 - Known Negotiate: libcurl always sends the body with the token, because it
   considers Negotiate done after the first token. A single-leg Kerberos
   exchange is fine, but Windows SSPI can fall back to NTLM inside SPNEGO and
@@ -307,6 +317,22 @@ leg that can succeed:
 - Seekable sources (`buffer()`, `set_seek()`) keep `Expect` suppressed and are
   rewound by libcurl as needed.
 
+### Back-to-back uploads across connections
+
+px gives every client connection its own worker thread, all sharing one
+`MCurl`/`MCURL.proxyauth`. The Expect decision above is only safe if it
+matches what `set_auth()` actually configured on this handle via
+`CURLOPT_PROXYAUTH`: `_prepare_expect()` reads `self.auth`, never a fresh
+`MCURL.proxyauth` lookup, because a sibling upload on the same proxy can
+cache the method in the gap between this handle's `set_auth()` and its own
+`_prepare_expect()`, which would otherwise make this check trust a narrower
+method than the one actually installed on the handle and wrongly suppress
+Expect. The method is also cached the moment libcurl reports it - when the
+final response's headers finish, before any body byte reaches
+`client_wfile` - rather than only after the whole transfer completes, so a
+fast client that reacts to the first response byte cannot race ahead of the
+cache write for its next upload on the same proxy.
+
 Unsupported cases:
 
 - A non-seekable body, unknown auth, and a proxy that ignores `Expect` (no
@@ -315,8 +341,6 @@ Unsupported cases:
   `mcurl.REWIND_ERROR` ("Request body cannot be resent ..."), and the result
   is inconclusive, never counted as an auth failure. The picked method is
   cached, so retrying the request succeeds.
-- NTLM through a proxy that closes the connection after each response: NTLM
-  is connection-bound and cannot complete, with or without a body.
 
 ### Non-blocking bridge() sources
 

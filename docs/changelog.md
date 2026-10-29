@@ -42,6 +42,12 @@
 - `bridge()` uploads stream through proxy auth without rewinding (no more
   curl error 65), chunked bodies are no longer dropped, and PATCH no longer
   buffers its body.
+- A `bridge()` upload sent immediately after a prior request through the
+  same not-yet-cached proxy no longer fails with curl error 65 (503). The
+  Expect decision now always matches what was actually configured for proxy
+  auth, and a known NTLM/Digest method still uses `Expect: 100-continue` so
+  a stale or closed proxy connection cannot consume the body before libcurl
+  notices.
 
 ### New features
 - Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
