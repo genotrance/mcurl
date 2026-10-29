@@ -106,7 +106,7 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `buffer(data=None)` | Setup BytesIO buffers for `perform()`; pass `data` for upload (POST/PUT) bodies |
-| `bridge(client_rfile, client_wfile, client_hfile)` | Bridge curl reads/writes to file-like objects |
+| `bridge(client_rfile, client_wfile, client_hfile)` | Bridge curl reads/writes to file-like objects. The request body is streamed from `client_rfile` once, never buffered; `client_rfile` only needs `read()` (a `seekable()`/`seek()` source can be rewound). Call `set_headers()` afterwards with `Content-Length`, or `Transfer-Encoding: chunked` for an unknown length. See [Streamed request bodies](#streamed-request-bodies) |
 | `set_transfer_decoding(enable=False)` | Control transfer decoding (chunked, gzip); disable to let the client handle it |
 | `get_data(encoding="utf-8")` | Return response body from `buffer()` |
 | `get_headers(encoding="utf-8")` | Return response headers from `buffer()` |
@@ -264,6 +264,57 @@ trying NTLM. `do()` detects this case (`get_proxyauth_used()` returns
 Negotiate removed from the auth mask, so the retry uses NTLM; only a failure
 of that retry counts towards the threshold. Windows SSPI already falls back
 to NTLM internally, so this never triggers there.
+
+### Streamed request bodies
+
+`bridge()` reads the request body from `client_rfile` through libcurl's read
+callback for every method that carries one (POST, PUT, PATCH, DELETE or any
+other verb). With `Content-Length` exactly that many bytes are streamed (short
+reads are fine); with `Transfer-Encoding: chunked` and no length the source is
+read until EOF and sent chunked. Before 8.23.0.3 a chunked body was silently
+dropped and PATCH copied the whole body into memory with
+`CURLOPT_COPYPOSTFIELDS`.
+
+A body source like px's client socket cannot rewind, yet proxy
+authentication may need several legs, and libcurl resends the body after any
+leg that ends in 407. mcurl therefore makes sure the body is only sent on a
+leg that can succeed:
+
+- `bridge()` installs a seek callback. A rewind to offset 0 succeeds when the
+  source is seekable or nothing has been read yet, otherwise it returns
+  `CURL_SEEKFUNC_CANTSEEK`, so libcurl never resends a partial body.
+- Proxy auth not known yet (no cached method for the proxy, or a mask with
+  several bits such as `ANY`, `NONEGOTIATE` or `ONLY*`): libcurl sends the
+  first leg without credentials and, without help, with the whole body. mcurl
+  sends `Expect: 100-continue`, so the proxy's 407 arrives before any body
+  byte. libcurl then closes that probe connection (one extra TCP connection)
+  and retries with the picked method. The picked method is cached even if
+  the request later fails, so the next upload starts the handshake upfront.
+- Known NTLM or Digest: libcurl sends the first leg with `Content-Length: 0`
+  and the body only on the final leg, and Basic is preemptive, so mcurl keeps
+  suppressing `Expect` and no extra round trip is paid. Authenticated
+  keep-alive connections are reused as before.
+- Known Negotiate: libcurl always sends the body with the token, because it
+  considers Negotiate done after the first token. A single-leg Kerberos
+  exchange is fine, but Windows SSPI can fall back to NTLM inside SPNEGO and
+  need another leg, which would consume the body. mcurl sends
+  `Expect: 100-continue` for Negotiate too: a Kerberos proxy answers 100 and
+  the body follows on the same leg (one round trip), while a continuation
+  407 arrives before the body, so the failure is clean and the body is never
+  half-sent.
+- Seekable sources (`buffer()`, `set_seek()`) keep `Expect` suppressed and are
+  rewound by libcurl as needed.
+
+Unsupported cases:
+
+- A non-seekable body, unknown auth, and a proxy that ignores `Expect` (no
+  100 or 407 within libcurl's 1 second wait): libcurl sends the body on the
+  probe leg and cannot resend it. `do()` reports resp 503 with the error text
+  `mcurl.REWIND_ERROR` ("Request body cannot be resent ..."), and the result
+  is inconclusive, never counted as an auth failure. The picked method is
+  cached, so retrying the request succeeds.
+- NTLM through a proxy that closes the connection after each response: NTLM
+  is connection-bound and cannot complete, with or without a body.
 
 ### Static methods
 
