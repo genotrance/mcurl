@@ -40,6 +40,11 @@ KEEPALIVE_COUNT = 3
 ERROR_BUFFER_SIZE = 256  # CURL_ERROR_SIZE
 TUNNEL_407 = "CONNECT tunnel failed, response 407"  # libcurl message for a final CONNECT 407
 NTLM_RECONNECT_REJECTED = "NTLM handshake rejected"
+# do() error text for CURLE_SEND_FAIL_REWIND (inconclusive, not an auth failure)
+REWIND_ERROR = (
+    "Request body cannot be resent: it was sent on a proxy authentication leg "
+    "and the body source cannot rewind (proxy ignored Expect: 100-continue?); "
+)
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
 MULTI_SELECT_TIMEOUT = 1.0
@@ -197,24 +202,27 @@ def debug_callback(easy, infotype, data, size, userp):
 def read_callback(buffer, size, nitems, userdata):
     tsize = size * nitems
     curl = MCURL.handles[cvp2pystr(userdata)]
+    # Known length: read at most the remaining bytes; chunked: read until EOF
     if curl.size is not None:
-        if curl.size > tsize:
-            curl.size -= tsize
-        else:
-            tsize = curl.size
-            curl.size = None
+        tsize = min(tsize, curl.size)
+    elif not curl._chunked:
+        tsize = 0
+    if tsize > 0:
         if curl.client_rfile is not None:
             try:
-                data = curl.client_rfile.read(tsize)
-                ffi.memmove(buffer, data, tsize)
+                data = curl.client_rfile.read(tsize) or b""
             except ConnectionError as exc:
                 dprint(curl.easyhash + ": Error reading from client: " + str(exc))
-                tsize = 0
+                data = b""
+            # read() may return fewer bytes than asked for
+            tsize = min(len(data), tsize)
+            ffi.memmove(buffer, data, tsize)
+            curl._body_read += tsize
+            if curl.size is not None:
+                curl.size -= tsize
         else:
             dprint(curl.easyhash + ": Read expected but no client")
             tsize = 0
-    else:
-        tsize = 0
 
     dprint(curl.easyhash + ": Read %d bytes" % tsize)
     return tsize
@@ -311,6 +319,12 @@ class Curl:
 
     # Declared request body length, kept so the body can be resent after a rewind
     _content_length = None
+    # Body has unknown length and is streamed until EOF (Transfer-Encoding: chunked)
+    _chunked = False
+    # Bytes read from client_rfile since the last rewind
+    _body_read = 0
+    # Expect header still to be chosen by _prepare_expect()
+    _expect_pending = False
 
     # For plain HTTP
     client_rfile = None
@@ -509,6 +523,9 @@ class Curl:
         self.proxy = None
         self.size = None
         self._content_length = None
+        self._chunked = False
+        self._body_read = 0
+        self._expect_pending = False
         self.user = None
         self.xheaders = None
         self._keepalive = []
@@ -606,22 +623,111 @@ class Curl:
         "Seek the request body source; a rewind to the start restores the read budget"
         if self._seek_fn is not None:
             ret = self._seek_fn(offset, origin)
-        elif self.client_rfile is not None and hasattr(self.client_rfile, "seek"):
+        elif self._source_seekable():
             try:
                 self.client_rfile.seek(offset, origin)
             except (OSError, ValueError):
                 return libcurl.CURL_SEEKFUNC_FAIL
             ret = libcurl.CURL_SEEKFUNC_OK
+        elif offset == 0 and origin == 0 and self._body_read == 0:
+            # Nothing consumed yet from a streaming source: already at the start
+            ret = libcurl.CURL_SEEKFUNC_OK
         else:
+            # Never resend a partial body from a source that cannot rewind
             return libcurl.CURL_SEEKFUNC_CANTSEEK
-        if ret == libcurl.CURL_SEEKFUNC_OK and offset == 0 and origin == 0 and self._content_length is not None:
-            self.size = self._content_length
+        if ret == libcurl.CURL_SEEKFUNC_OK and offset == 0 and origin == 0:
+            self._body_read = 0
+            if self._content_length is not None:
+                self.size = self._content_length
         return ret
+
+    def _source_seekable(self):
+        "True if client_rfile can rewind (seekable(), or seek() if it has no seekable())"
+        rfile = self.client_rfile
+        if rfile is None or not hasattr(rfile, "seek"):
+            return False
+        seekable = getattr(rfile, "seekable", None)
+        if seekable is None:
+            return True
+        try:
+            return bool(seekable())
+        except (OSError, ValueError):
+            return False
+
+    def _can_rewind(self):
+        "True if the request body can be resent after libcurl consumed part of it"
+        return self._seek_fn is not None or self._source_seekable()
+
+    def _prepare_expect(self):
+        """
+        Pick the Expect header for a known-length body just before the transfer.
+
+        A streamed body that cannot rewind must not go out on a proxy auth leg
+        that ends in 407. libcurl itself sends a Content-Length: 0 probe once
+        NTLM or Digest is picked, and Basic is preemptive, so "Expect:" stays
+        suppressed for those. When the method is not known yet (several bits
+        such as ANY) or is Negotiate (whose token leg always carries the body,
+        and SSPI SPNEGO can need more legs), "Expect: 100-continue" makes
+        libcurl hold the body until the proxy answers.
+        """
+        if not self._expect_pending:
+            return
+        self._expect_pending = False
+        line = "Expect:"
+        if (
+            self.proxy is not None
+            and self.auth is not None
+            and not self.is_connect
+            and self.client_rfile is not None
+            and not self._can_rewind()
+        ):
+            auth = (MCURL.proxyauth.get(self.proxy) if MCURL is not None else None) or self.auth
+            if auth not in (
+                libcurl.CURLAUTH_NTLM,
+                libcurl.CURLAUTH_DIGEST,
+                libcurl.CURLAUTH_DIGEST_IE,
+                libcurl.CURLAUTH_BASIC,
+            ):
+                line = "Expect: 100-continue"
+        dprint(self.easyhash + ": Adding header => " + line)
+        self.headers = libcurl.curl_slist_append(self.headers, py2cstr(line))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPHEADER, self.headers)
+
+    def _enable_body(self, size):
+        """
+        Send the request body through the read callback; size -1 is unknown
+        (chunked). POST, PUT, PATCH and any other method share this path, so
+        the body is streamed from client_rfile and never copied in memory.
+        Returns True if a body will be sent.
+        """
+        if self.is_upload:
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_INFILESIZE, py2clong(size))
+            return True
+        if not self.is_post:
+            if size == 0:
+                # Nothing to stream; keep the method as it is
+                return False
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POST, py2cbool(True))
+            # CURLOPT_POST would turn GET into POST, so keep the method verb
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_CUSTOMREQUEST, self._keepstr(self.method))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POSTFIELDSIZE, py2clong(size))
+        return True
 
     def set_headers(self, xheaders):
         "Set request headers from a dict of {name: value} pairs"
         self.headers = ffi.NULL
+        self._expect_pending = False
         skip_proxy_headers = True if self.proxy is not None and self.auth is not None else False
+        lcheaders = {header.lower(): str(xheaders[header]) for header in xheaders}
+        has_body = (self.is_upload or self.is_post or self.client_rfile is not None) and not self.is_connect
+        if (
+            has_body
+            and "content-length" not in lcheaders
+            and "chunked" in lcheaders.get("transfer-encoding", "").lower()
+        ):
+            # Unknown length: stream the body until EOF with chunked encoding
+            self._chunked = True
+            self._expect_pending = self._enable_body(-1) and "expect" not in lcheaders
         for header in xheaders:
             lcheader = header.lower()
             if skip_proxy_headers and lcheader.startswith("proxy-"):
@@ -631,25 +737,17 @@ class Curl:
                 continue
             elif lcheader == "content-length":
                 size = int(xheaders[header])
-                if self.is_upload or self.is_post:
-                    # Save content-length for PUT/POST later
-                    # Turn off Transfer-Encoding since size is known
+                if has_body:
+                    # Save content-length so the read callback streams exactly
+                    # this many bytes; turn off Transfer-Encoding since size is
+                    # known and pick Expect just before the transfer
                     self.size = size
                     self._content_length = size
+                    self._chunked = False
                     self.headers = libcurl.curl_slist_append(self.headers, py2cstr("Transfer-Encoding:"))
-                    self.headers = libcurl.curl_slist_append(self.headers, py2cstr("Expect:"))
-                    if self.is_post:
-                        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POSTFIELDSIZE, py2clong(size))
-                    else:
-                        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_INFILESIZE, py2clong(size))
-                elif self.is_patch:
-                    # Get data from client - libcurl doesn't seem to use READFUNCTION
-                    try:
-                        data = self.client_rfile.read(size)
-                    except AttributeError as exc:
-                        dprint("set_headers() called before buffer()/bridge()?")
-                        raise exc
-                    libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_COPYPOSTFIELDS, py2custr(data))
+                    self._expect_pending = self._enable_body(size) and "expect" not in lcheaders
+            elif lcheader == "transfer-encoding" and has_body and "content-length" in lcheaders:
+                continue
             elif lcheader == "user-agent":
                 # Forward user agent via setopt
                 self.set_useragent(xheaders[header])
@@ -698,6 +796,9 @@ class Curl:
             self.client_rfile = client_rfile
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_READFUNCTION, libcurl.read_callback)
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_READDATA, self.ceasyhash)
+            # Rewinds succeed only if the source can seek or nothing was read yet
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SEEKFUNCTION, libcurl.seek_callback)
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SEEKDATA, self.ceasyhash)
 
         if client_wfile is not None:
             self.client_wfile = client_wfile
@@ -1035,6 +1136,9 @@ class Curl:
         new.client_hfile = None
         new.size = None
         new._content_length = None
+        new._chunked = False
+        new._body_read = 0
+        new._expect_pending = False
         new.cerr = libcurl.CURLE_OK
         new.done = False
         new.errstr = ""
@@ -1145,6 +1249,7 @@ class Curl:
         # However, add easyhash to MCURL.handles since it is used in curl callbacks
         with MCURL._lock:
             MCURL.handles[self.easyhash] = self
+        self._prepare_expect()
         self.cerr = libcurl.curl_easy_perform(self.easy)
         if self.cerr != libcurl.CURLE_OK:
             dprint(self.easyhash + ": Connection failed: " + Curl.strerror(self.cerr) + "; " + self.errstr)
@@ -1237,7 +1342,10 @@ class Curl:
 
     def _save_auth(self):
         "Find and cache proxy auth method used by libcurl"
-        if self.auth is None or self.cerr != libcurl.CURLE_OK:
+        # A failed rewind still learned the method on the probe leg: cache it
+        # so the next upload starts the handshake upfront
+        rewind_failed = self.cerr == libcurl.CURLE_SEND_FAIL_REWIND
+        if self.auth is None or (self.cerr != libcurl.CURLE_OK and not rewind_failed):
             # No need to check auth
             # - No auth requested - client will authenticate directly
             # - libcurl errror encountered
@@ -1249,7 +1357,7 @@ class Curl:
             return
 
         ret, code = self.get_response()
-        if ret != libcurl.CURLE_OK or code in (0, 407):
+        if not rewind_failed and (ret != libcurl.CURLE_OK or code in (0, 407)):
             # No response or the proxy rejected the auth method used - not worth caching
             dprint(f"{self.easyhash}: Not caching proxy auth method: response {code}")
             return
@@ -1536,6 +1644,7 @@ class MCurl:
         # Add a handle
         dprint(curl.easyhash + ": Add handle")
         if curl.easyhash not in self.handles:
+            curl._prepare_expect()
             self.handles[curl.easyhash] = curl
             libcurl.curl_multi_add_handle(self._multi, curl.easy)
             dprint(curl.easyhash + ": Added handle")
@@ -1671,9 +1780,10 @@ class MCurl:
                 curl.resp = 504
                 curl.errstr += Curl.strerror(curl.cerr)
             elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
-                # POST/PUT rewind not supported (#199) - retry
+                # The body went out on a proxy auth leg and the source cannot
+                # rewind: inconclusive, never an auth failure (see docs/api.md)
                 curl.resp = 503
-                curl.errstr += Curl.strerror(curl.cerr)
+                curl.errstr += REWIND_ERROR
             elif curl.cerr in [
                 libcurl.CURLE_SSL_CONNECT_ERROR,
                 libcurl.CURLE_PEER_FAILED_VERIFICATION,

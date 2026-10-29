@@ -39,6 +39,9 @@
   resend it; the read budget was not restored on rewind, so such requests
   failed with Curl error 26 (resp 503). A body source that cannot be
   rewound makes the NTLM retry inconclusive (503) rather than an auth failure.
+- `bridge()` uploads stream through proxy auth without rewinding (no more
+  curl error 65), chunked bodies are no longer dropped, and PATCH no longer
+  buffers its body.
 
 ### New features
 - Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
