@@ -21,11 +21,15 @@ import struct
 import sys
 import threading
 import time
-import tracemalloc
 
 import pytest
 
 import mcurl
+
+try:
+    import tracemalloc
+except ImportError:  # PyPy ships no _tracemalloc
+    tracemalloc = None
 
 TARGET = "http://stream-upload.invalid/upload"
 USER = "user"
@@ -508,6 +512,7 @@ def test_concurrent_back_to_back_uploads_do_not_rewind(proxy, multi, auth):
     assert not errors, errors
 
 
+@pytest.mark.skipif(tracemalloc is None, reason="tracemalloc is unavailable on PyPy")
 def test_large_streamed_body_bounded_memory(proxy, multi):
     length = 8 * 1024 * 1024
     source = StreamSource(length, max_read=60000)
