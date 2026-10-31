@@ -49,6 +49,7 @@ REWIND_ERROR = (
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
 MULTI_SELECT_TIMEOUT = 1.0
+PENDING_WRITE_SELECT_TIMEOUT = 0.01
 
 __all__ = [
     "Curl",
@@ -1516,11 +1517,11 @@ class Curl:
 def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
     # libcurl socket callback: add/remove actions for socket events
     del easy, userp, socketp
-    if ev_bitmask & libcurl.CURL_POLL_IN or ev_bitmask & libcurl.CURL_POLL_INOUT:
+    if ev_bitmask & libcurl.CURL_POLL_IN:
         # dprint("Read sock_fd %d" % sock_fd)
         MCURL.rlist.add(sock_fd)
 
-    if ev_bitmask & libcurl.CURL_POLL_OUT or ev_bitmask & libcurl.CURL_POLL_INOUT:
+    if ev_bitmask & libcurl.CURL_POLL_OUT:
         # dprint("Write sock_fd %d" % sock_fd)
         MCURL.wlist.add(sock_fd)
 
@@ -1958,6 +1959,7 @@ class MCurl:
             rsnap_set = set(self.rlist)
             wsnap_set = set(self.wlist)
             timer = self.timer
+            pending_write = any(curl._wpending or curl._wdone is not None for curl in self.handles.values())
 
         rsnap = list(rsnap_set)
         wsnap = list(wsnap_set)
@@ -1970,6 +1972,10 @@ class MCurl:
             # _wake_r is always included so resume() from another thread cuts
             # this wait short instead of waiting out the timer/select cap.
             wait = MULTI_SELECT_TIMEOUT if timer is None else max(0.0, timer - time.monotonic())
+            if pending_write:
+                # A receive pause can make libcurl withdraw every socket event,
+                # so retry the sink independently of its potentially long timer.
+                wait = min(wait, PENDING_WRITE_SELECT_TIMEOUT)
             # A socket can close between the snapshot and select(). Continue
             # with the empty poll so pending sink writes and completions can
             # progress, and drop whichever descriptors are really dead below.
@@ -1977,14 +1983,15 @@ class MCurl:
                 rready, wready, xready = select.select([*rsnap, self._wake_r], wsnap, list(rsnap_set | wsnap_set), wait)
             except OSError:
                 select_failed = True
-            except ValueError:
-                # On Unix this can mean fd >= FD_SETSIZE, not a closed socket.
-                # Leave the registered descriptors alone and let libcurl
-                # refresh them through the timeout action below.
-                pass
+            except ValueError as exc:
+                # select() cannot service a descriptor outside FD_SETSIZE.
+                # Failing explicitly is safer than leaving a live transfer
+                # registered forever with no possible readiness notification.
+                raise RuntimeError("select() cannot monitor a registered libcurl socket") from exc
         else:
             if timer is not None:
-                time.sleep(max(0.0, timer - time.monotonic()))
+                wait = max(0.0, timer - time.monotonic())
+                time.sleep(min(wait, PENDING_WRITE_SELECT_TIMEOUT) if pending_write else wait)
 
         # Process ready sockets under lock
         with self._lock:
