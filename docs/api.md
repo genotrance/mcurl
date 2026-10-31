@@ -371,7 +371,13 @@ sources and sinks can now be non-blocking instead:
   pending, completion is held back until the suffix is flushed, so the final
   bytes are not lost. If that flush fails, completion reports
   `CURLE_WRITE_ERROR`. Pending data and queued resumes are dropped by
-  `stop()`/`remove()` and `Curl.reset()`. A sink that consumes everything
+  `stop()`/`remove()` and `Curl.reset()`. A queued resume also cannot outlive
+  the transfer it targeted even if none of those run first: each `resume()`
+  request is tagged with the easy handle's current generation number, bumped
+  each time `add()` activates it for a transfer, so a request still queued
+  once the same (reused) handle has moved on to a later transfer is
+  recognised as stale and discarded instead of clearing a pause the later
+  transfer set for its own, unrelated reason. A sink that consumes everything
   behaves exactly as before.
 - Resume from any thread with `curl.resume_upload()` (clears the paused read
   direction) or `curl.resume_download()` (clears the paused write direction),

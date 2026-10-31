@@ -371,6 +371,10 @@ class Curl:
     _expect_pending = False
     # CURLPAUSE_SEND/CURLPAUSE_RECV bits currently paused on this handle
     _pause_mask = 0
+    # Bumped by MCurl._add_handle() each time this easy handle is activated
+    # for a transfer; lets a queued resume() request be told apart from one
+    # meant for a transfer that previously used the same handle
+    _generation = 0
     # Unwritten suffix of a chunk client_wfile.write() accepted only partially
     _wpending = b""
     # client_wfile failed while flushing _wpending; abort on next write
@@ -1789,12 +1793,19 @@ class MCurl:
         None clears both. curl_easy_pause() itself is only ever called by the
         thread currently driving the multi handle inside _perform(), while it
         holds self._lock, so a resume request here only records the request
-        and wakes that thread instead of calling it directly.
+        and wakes that thread instead of calling it directly. The request is
+        tagged with curl._generation as it stands right now, so a request
+        that is still queued once curl has been reused for a later transfer
+        (a higher generation) is recognised as stale instead of being applied
+        to that later transfer; see _add_handle().
         """
         if bitmask is None:
             bitmask = libcurl.CURLPAUSE_ALL
         with self._resume_lock:
-            self._pending_resume[curl.easyhash] = self._pending_resume.get(curl.easyhash, 0) | bitmask
+            generation, bits = self._pending_resume.get(curl.easyhash, (curl._generation, 0))
+            if generation != curl._generation:
+                bits = 0
+            self._pending_resume[curl.easyhash] = (curl._generation, bits | bitmask)
         self._wake()
 
     def _drop_pending_resume(self, curl):
@@ -1819,15 +1830,20 @@ class MCurl:
         with self._resume_lock:
             pending = self._pending_resume
             self._pending_resume = {}
-        for easyhash, clear_bits in pending.items():
+        applied = False
+        for easyhash, (generation, clear_bits) in pending.items():
             curl = self.handles.get(easyhash)
-            if curl is None:
+            if curl is None or curl._generation != generation:
+                # Either gone, or curl was reused for a later transfer after
+                # this request was queued against an earlier one - discard it
+                # rather than misapply it to a transfer it was never about.
                 continue
+            applied = True
             if clear_bits & libcurl.CURLPAUSE_RECV and curl._wpending and not curl._flush_pending():
                 clear_bits &= ~libcurl.CURLPAUSE_RECV
             curl._pause_mask &= ~clear_bits
             libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
-        return True
+        return applied
 
     # Adding to multi
 
@@ -1839,6 +1855,13 @@ class MCurl:
             curl._prepare_expect()
             self.handles[curl.easyhash] = curl
             libcurl.curl_multi_add_handle(self._multi, curl.easy)
+            # Only now, with the handle fully active, start a new generation:
+            # resume() tags every request with curl._generation as of when it
+            # is called, so one that raced in anywhere above (even after the
+            # drop) still carries the old value and _apply_pending_resumes()
+            # will find it stale instead of clearing a pause on this transfer.
+            with self._resume_lock:
+                curl._generation += 1
             dprint(curl.easyhash + ": Added handle")
         else:
             dprint(curl.easyhash + ": Active handle")
