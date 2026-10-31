@@ -182,8 +182,8 @@ with automatic Python-to-C type conversion.
 | `dup(url=None)` | Clone this handle into a new `Curl` instance with all libcurl options preserved - useful for template-based workflows |
 | `pause(bitmask)` | Pause send/receive on the handle |
 | `unpause()` | Resume all paused transfers |
-| `resume_upload()` | Thread-safe: resume a request body paused by a `bridge()` read source returning `CURL_READFUNC_PAUSE`. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
-| `resume_download()` | Thread-safe: resume a response paused by a `bridge()` write sink returning `CURL_WRITEFUNC_PAUSE`. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
+| `resume_upload(transfer_id=None)` | Thread-safe: resume a request body paused by a `bridge()` read source returning `CURL_READFUNC_PAUSE`; returns whether the request was queued. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
+| `resume_download(transfer_id=None)` | Thread-safe: resume a response paused by a `bridge()` write sink returning `CURL_WRITEFUNC_PAUSE`; returns whether the request was queued. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 
 ### Context manager
 
@@ -202,6 +202,7 @@ with mcurl.Curl("http://example.com") as c:
 |-----------|------|-------------|
 | `easy` | cffi handle | Underlying `CURL *` handle |
 | `easyhash` | str | Unique hash for dict keying |
+| `transfer_id` | int | Read-only identity of the transfer the handle is configured for; changes when `MCurl.remove()`/`stop()` or `reset()` ends it. Pass it to `resume_upload()`/`resume_download()`, see [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 | `url` | str | Request URL |
 | `method` | str | HTTP method |
 | `proxy` | str | Proxy host (if set) |
@@ -371,13 +372,7 @@ sources and sinks can now be non-blocking instead:
   pending, completion is held back until the suffix is flushed, so the final
   bytes are not lost. If that flush fails, completion reports
   `CURLE_WRITE_ERROR`. Pending data and queued resumes are dropped by
-  `stop()`/`remove()` and `Curl.reset()`. A queued resume also cannot outlive
-  the transfer it targeted even if none of those run first: each `resume()`
-  request is tagged with the easy handle's current generation number, bumped
-  each time `add()` activates it for a transfer, so a request still queued
-  once the same (reused) handle has moved on to a later transfer is
-  recognised as stale and discarded instead of clearing a pause the later
-  transfer set for its own, unrelated reason. A sink that consumes everything
+  `stop()`/`remove()` and `Curl.reset()`. A sink that consumes everything
   behaves exactly as before.
 - Resume from any thread with `curl.resume_upload()` (clears the paused read
   direction) or `curl.resume_download()` (clears the paused write direction),
@@ -390,6 +385,33 @@ sources and sinks can now be non-blocking instead:
   internal `socketpair()`, not `curl_multi_wakeup()`, since mcurl polls
   sockets with `select()` directly rather than through `curl_multi_poll()`),
   so a resume does not wait out the current `select()` timeout.
+- A resume belongs to one transfer, not to the `Curl` object. A `Curl` that is
+  reused (`remove()` or `stop()`, usually followed by `reset()`, then another
+  `do()`/`add()`) runs a new transfer, and a resume call can be delayed by
+  thread scheduling for any length of time, so when it finally executes mcurl
+  cannot tell from the call alone which transfer it was meant for. The caller
+  therefore names the transfer: read `curl.transfer_id` after configuring the
+  transfer and before starting it, and pass it to `resume_upload()`,
+  `resume_download()` or `MCurl.resume()`. The id stays the same for the whole
+  transfer, including the legs `do()` re-adds internally for a proxy-auth
+  retry, and changes only when `remove()`, `stop()`, `close()` or `reset()`
+  ends the transfer. The resume calls return `True` when the request was
+  queued and `False` when it was discarded: its transfer has ended (the id
+  is stale), or the handle is not running in the multi handle right now
+  (before `add()`, between the internal retry legs, or after removal), when
+  nothing of that transfer can be paused; the first read or write of a
+  starting transfer asks the source or sink anyway. The id check and the
+  queueing happen under the same lock that ends a transfer and drops its
+  queued resumes, so a request with a stale id can never clear a pause of a
+  later transfer, however late it runs and whether or not that transfer has
+  paused yet.
+- Without `transfer_id`, a resume is only unambiguous during the first
+  transfer of a `Curl` (no earlier transfer exists that it could belong to),
+  so the original no-argument calls keep working for a handle that is never
+  reused. Once the handle has been reused, a call without `transfer_id`
+  while it is running raises `ValueError` instead of guessing, since it may
+  be a late call for an earlier transfer; while it is not running it is
+  discarded as above.
 - A handle that is paused indefinitely still honours `CURLOPT_TIMEOUT` /
   `set_timeout()` (the timer that drives it is independent of pause state) and
   is removed cleanly by `remove()`/`stop()`; neither waits for the source. A
@@ -425,7 +447,7 @@ sources and sinks can now be non-blocking instead:
 | `do(curl)` | Add a `Curl` handle and perform until completion; returns `True` on success |
 | `remove(curl)` | Remove a completed `Curl` handle from the multi instance |
 | `stop(curl)` | Abort a running `Curl` handle and remove it from the multi instance |
-| `resume(curl, bitmask=None)` | Thread-safe: queue `curl` to resume a paused direction (`CURLPAUSE_SEND` and/or `CURLPAUSE_RECV`; `None` clears both) and wake the thread driving the multi handle. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
+| `resume(curl, bitmask=None, transfer_id=None)` | Thread-safe: queue `curl` to resume a paused direction (`CURLPAUSE_SEND` and/or `CURLPAUSE_RECV`; `None` clears both) of the transfer `transfer_id` and wake the thread driving the multi handle; returns `True` if queued, `False` if discarded. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 | `select(curl, client_sock, idle=30)` | Run a bidirectional select loop between a client socket and a CONNECT tunnel |
 | `close()` | Stop all running transfers and close the multi handle |
 
