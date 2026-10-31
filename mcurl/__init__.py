@@ -246,6 +246,14 @@ def write_callback(buffer, size, nitems, userdata):
     if tsize > 0:
         if curl.sentheaders:
             if curl.client_wfile is not None:
+                if curl._wfail:
+                    return 0
+                # Earlier bytes must reach the sink first to preserve order
+                if curl._wpending and not curl._flush_pending():
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    return libcurl.CURL_WRITEFUNC_PAUSE
+                if curl._wfail:
+                    return 0
                 try:
                     written = curl.client_wfile.write(ffi.buffer(buffer, tsize))
                 except BlockingIOError:
@@ -261,6 +269,15 @@ def write_callback(buffer, size, nitems, userdata):
                     dprint(curl.easyhash + ": Write would block, pausing")
                     curl._pause_mask |= libcurl.CURLPAUSE_RECV
                     return libcurl.CURL_WRITEFUNC_PAUSE
+                if 0 < written < tsize:
+                    # Partial write: libcurl treats a short return as an error,
+                    # so keep the suffix (at most one chunk) and pause until
+                    # it has been flushed
+                    dprint(curl.easyhash + ": Partial write %d of %d bytes, pausing" % (written, tsize))
+                    curl._wpending = bytes(ffi.buffer(buffer, tsize))[written:]
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
+                    return tsize
                 tsize = written
             else:
                 dprint(curl.easyhash + ": Ignored %d bytes" % tsize)
@@ -354,6 +371,12 @@ class Curl:
     _expect_pending = False
     # CURLPAUSE_SEND/CURLPAUSE_RECV bits currently paused on this handle
     _pause_mask = 0
+    # Unwritten suffix of a chunk client_wfile.write() accepted only partially
+    _wpending = b""
+    # client_wfile failed while flushing _wpending; abort on next write
+    _wfail = False
+    # CURLMSG_DONE result held back until _wpending has been flushed
+    _wdone = None
 
     # For plain HTTP
     client_rfile = None
@@ -529,6 +552,28 @@ class Curl:
             self.easy, libcurl.CURLOPT_HTTP_VERSION, py2clong(getattr(libcurl, "CURL_HTTP_VERSION_" + version))
         )
 
+    def _clear_write_state(self):
+        self._wpending = b""
+        self._wfail = False
+        self._wdone = None
+
+    def _flush_pending(self):
+        "Write the pending suffix to client_wfile; True once nothing is left. Must run on the driving thread."
+        while self._wpending:
+            try:
+                written = self.client_wfile.write(self._wpending)
+            except BlockingIOError:
+                return False
+            except ConnectionError as exc:
+                dprint(self.easyhash + ": Error writing to client: " + str(exc))
+                self._wpending = b""
+                self._wfail = True
+                return True
+            if not written:
+                return False
+            self._wpending = self._wpending[written:]
+        return True
+
     def reset(self, url, method="GET", request_version="HTTP/1.1", connect_timeout=60):
         """Reuse existing curl instance for another request.
 
@@ -543,6 +588,7 @@ class Curl:
             MCURL._release_probe(self)
         libcurl.curl_easy_reset(self.easy)
         self.sock_fd = None
+        self._clear_write_state()
 
         self.client_rfile = None
         self.client_wfile = None
@@ -1706,10 +1752,31 @@ class MCurl:
                 # Always true since only one msg type
                 easyhash = gethash(msg.easy_handle)
                 curl = self.handles[easyhash]
-                curl.done = True
+                if curl._wpending and not curl._flush_pending():
+                    # Final bytes still waiting for the sink: finish later
+                    curl._wdone = msg.data.result
+                    continue
+                self._finish(curl, msg.data.result)
 
-                if msg.data.result != libcurl.CURLE_OK:
-                    curl.cerr = msg.data.result
+    @staticmethod
+    def _finish(curl, result):
+        curl._wdone = None
+        curl.done = True
+        if result != libcurl.CURLE_OK:
+            curl.cerr = result
+
+    def _flush_pending_writes(self):
+        # Retry every pending write suffix, resume receiving once flushed and
+        # complete handles whose CURLMSG_DONE waited on one; hold self._lock
+        for curl in list(self.handles.values()):
+            if not curl._wpending and curl._wdone is None:
+                continue
+            if curl._flush_pending() or curl._wfail:
+                if curl._wdone is not None:
+                    self._finish(curl, curl._wdone)
+                elif curl._pause_mask & libcurl.CURLPAUSE_RECV:
+                    curl._pause_mask &= ~libcurl.CURLPAUSE_RECV
+                    libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
 
     def resume(self, curl: Curl, bitmask=None):
         """Thread-safe: queue curl to resume a paused direction, from any thread.
@@ -1747,6 +1814,8 @@ class MCurl:
             curl = self.handles.get(easyhash)
             if curl is None:
                 continue
+            if clear_bits & libcurl.CURLPAUSE_RECV and curl._wpending and not curl._flush_pending():
+                clear_bits &= ~libcurl.CURLPAUSE_RECV
             curl._pause_mask &= ~clear_bits
             libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
         return True
@@ -1779,6 +1848,7 @@ class MCurl:
 
         if curl.done is False:
             curl.done = True
+        curl._clear_write_state()
 
         if len(errstr) != 0:
             curl.errstr += errstr + "; "
@@ -1841,6 +1911,7 @@ class MCurl:
                 rready.remove(self._wake_r)
                 self._drain_wake()
             resumed = self._apply_pending_resumes()
+            self._flush_pending_writes()
             if len(rready) == 0 and len(wready) == 0 and len(xready) == 0:
                 # dprint("No activity")
                 self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
