@@ -1964,11 +1964,11 @@ class MCurl:
             # _wake_r is always included so resume() from another thread cuts
             # this wait short instead of waiting out the timer/select cap.
             wait = MULTI_SELECT_TIMEOUT if timer is None else timer
-            try:
+            # A socket can close between the snapshot and select(). Continue
+            # with the empty poll so pending sink writes and completions can
+            # progress while libcurl refreshes its socket list.
+            with contextlib.suppress(OSError):
                 rready, wready, xready = select.select([*rsnap, self._wake_r], wsnap, list(rsnap_set | wsnap_set), wait)
-            except OSError:
-                # Socket closed between snapshot and select()
-                return
         else:
             if timer is not None:
                 time.sleep(timer)
