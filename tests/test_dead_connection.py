@@ -196,9 +196,10 @@ def test_multi_no_timer_no_sockets_does_not_sleep(monkeypatch):
     monkeypatch.setattr(mcurl.time, "sleep", slept.append)
     multi._perform()
     assert slept == []
-    multi.timer = 0.25
+    multi.timer = time.monotonic() + 0.25
     multi._perform()
-    assert slept == [0.25]
+    assert len(slept) == 1
+    assert 0 <= slept[0] <= 0.25
     multi.close()
 
 
