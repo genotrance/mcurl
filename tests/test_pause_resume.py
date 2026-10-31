@@ -96,6 +96,36 @@ class PausingSink:
         return len(buf)
 
 
+class PartialSink:
+    """Non-blocking sink accepting at most `limit` bytes per write() call.
+
+    Once `limit_calls` calls were served the sink returns None (not ready)
+    until allow() is called, like a socket whose send buffer is full.
+    """
+
+    def __init__(self, limit=1000, ready_calls=3):
+        self.data = bytearray()
+        self.limit = limit
+        self.ready_calls = ready_calls
+        self.calls = 0
+        self.partial = 0
+        self._allowed = threading.Event()
+
+    def allow(self):
+        self._allowed.set()
+
+    def write(self, buf):
+        if not self._allowed.is_set():
+            self.calls += 1
+            if self.calls > self.ready_calls:
+                return None
+        n = min(len(buf), self.limit)
+        if n < len(buf):
+            self.partial += 1
+        self.data += bytes(buf[:n])
+        return n
+
+
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -306,6 +336,63 @@ def test_paused_write_resumed_from_other_thread(local_server, multi):
     sink.allow()
     curl.resume_download()
     worker.join(5)
+    assert not worker.is_alive()
+    assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
+    assert bytes(sink.data) == body
+
+
+@pytest.mark.parametrize("ready_calls", [1000000, 3])
+def test_partial_writes_keep_all_bytes_in_order(local_server, multi, ready_calls):
+    "A sink that accepts only part of each buffer loses nothing, in order, even when it later blocks"
+    body = _chunk(0, 200000)
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            self.request.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+
+    addr = local_server(Handler)
+    sink = PartialSink(limit=777, ready_calls=ready_calls)
+    curl = mcurl.Curl(_url(addr))
+    curl.bridge(None, sink, None)
+
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)))
+    worker.start()
+    if ready_calls < 1000000:
+        time.sleep(0.3)
+        assert bytes(sink.data) != body
+        sink.allow()
+        curl.resume_download()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
+    assert sink.partial > 0
+    assert bytes(sink.data) == body
+
+
+def test_partial_write_pending_at_completion_is_flushed(local_server, multi):
+    "A transfer finishing while a suffix is pending still delivers the final bytes after resume"
+    body = b"y" * 5000
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            self.request.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+
+    addr = local_server(Handler)
+    sink = PartialSink(limit=100, ready_calls=1)
+    curl = mcurl.Curl(_url(addr))
+    curl.bridge(None, sink, None)
+
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)))
+    worker.start()
+    time.sleep(0.3)
+    assert worker.is_alive()
+    sink.allow()
+    curl.resume_download()
+    worker.join(10)
     assert not worker.is_alive()
     assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
     assert bytes(sink.data) == body

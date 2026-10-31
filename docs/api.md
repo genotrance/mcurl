@@ -359,6 +359,18 @@ sources and sinks can now be non-blocking instead:
   mean the downstream client cannot accept more right now. mcurl returns
   `CURL_WRITEFUNC_PAUSE`; libcurl buffers that chunk internally (not mcurl)
   and redelivers it to `write_callback` once resumed.
+- `client_wfile.write(buf)` may also accept only part of the buffer
+  (`0 < n < len(buf)`, as a non-blocking socket does). libcurl treats a short
+  return from its write callback as an error, so mcurl instead keeps the
+  unwritten suffix in a per-handle pending buffer (at most one libcurl chunk,
+  so memory stays bounded), reports the whole chunk consumed and pauses
+  receiving. The suffix is written first, ahead of any new data, when the
+  handle is resumed (`resume_download()`), and mcurl also retries it on every
+  event-loop pass; if the sink still cannot take it,
+  receiving stays paused. If the transfer completes while a suffix is
+  pending, completion is held back until the suffix is flushed, so the final
+  bytes are not lost. Pending data is dropped by `stop()`/`remove()` and
+  `Curl.reset()`. A sink that consumes everything behaves exactly as before.
 - Resume from any thread with `curl.resume_upload()` (clears the paused read
   direction) or `curl.resume_download()` (clears the paused write direction),
   or the lower-level `MCurl.resume(curl, bitmask=None)` (`bitmask` is
