@@ -263,6 +263,52 @@ def test_select_error_flushes_pending_completion(multi, monkeypatch):
     assert curl.done
 
 
+@pytest.mark.parametrize("ready_calls", [1000000, 3])
+def test_stale_socket_cannot_strand_partial_write_transfer(local_server, multi, monkeypatch, ready_calls):
+    "A dead descriptor left in the socket lists must be dropped, not make every later select() fail"
+    body = _chunk(0, 200000)
+    stale = 54321
+    failures = []
+    real_select = mcurl.select.select
+
+    def select_with_stale(rlist, wlist, xlist, *args):
+        # WSAENOTSOCK (Windows) for as long as the dead descriptor is listed
+        if stale in [*rlist, *wlist, *xlist]:
+            failures.append(stale)
+            raise OSError(10038, "not a socket")
+        return real_select(rlist, wlist, xlist, *args)
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            self.request.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+
+    addr = local_server(Handler)
+    sink = PartialSink(limit=777, ready_calls=ready_calls)
+    curl = mcurl.Curl(_url(addr))
+    curl.bridge(None, sink, None)
+    monkeypatch.setattr(mcurl.select, "select", select_with_stale)
+    multi.rlist.add(stale)
+    multi.wlist.add(stale)
+
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)), daemon=True)
+    worker.start()
+    if ready_calls < 1000000:
+        time.sleep(0.3)
+        assert bytes(sink.data) != body
+        sink.allow()
+        curl.resume_download()
+    worker.join(10)
+    assert not worker.is_alive(), f"transfer stranded after {len(failures)} select failures"
+    assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
+    assert sink.partial > 0
+    assert bytes(sink.data) == body
+    assert stale not in multi.rlist
+    assert stale not in multi.wlist
+    assert 1 <= len(failures) <= 3
+
+
 @pytest.mark.slow
 def test_stalled_uploader_does_not_delay_concurrent_transfers(local_server, multi):
     upload_addr = local_server(_EchoHandler)

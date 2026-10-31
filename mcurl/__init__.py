@@ -1958,6 +1958,7 @@ class MCurl:
         wsnap = list(wsnap_set)
         # select()/sleep() outside the lock so other threads can add/remove
         rready, wready, xready = [], [], []
+        select_failed = False
         if len(rsnap) != 0 or len(wsnap) != 0:
             # Cap only waits on sockets, which activity can interrupt; with no
             # sockets and no timer, sleeping would stall every caller of do().
@@ -1966,9 +1967,11 @@ class MCurl:
             wait = MULTI_SELECT_TIMEOUT if timer is None else timer
             # A socket can close between the snapshot and select(). Continue
             # with the empty poll so pending sink writes and completions can
-            # progress while libcurl refreshes its socket list.
-            with contextlib.suppress(OSError):
+            # progress, and drop whichever descriptors are really dead below.
+            try:
                 rready, wready, xready = select.select([*rsnap, self._wake_r], wsnap, list(rsnap_set | wsnap_set), wait)
+            except (OSError, ValueError):
+                select_failed = True
         else:
             if timer is not None:
                 time.sleep(timer)
@@ -1978,6 +1981,8 @@ class MCurl:
             if self._wake_r in rready:
                 rready.remove(self._wake_r)
                 self._drain_wake()
+            if select_failed:
+                self._drop_dead_sockets(rsnap_set | wsnap_set)
             resumed = self._apply_pending_resumes()
             self._flush_pending_writes()
             if len(rready) == 0 and len(wready) == 0 and len(xready) == 0:
@@ -1997,6 +2002,20 @@ class MCurl:
                     # A resumed handle may have no socket activity of its own
                     # this round; give it a chance to progress too
                     self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
+
+    def _drop_dead_sockets(self, socks):
+        # select() failed on a snapshot, which does not say which descriptor is
+        # at fault. Probe each one and forget the dead ones (Windows keeps
+        # failing with WSAENOTSOCK on every later select() otherwise, so
+        # libcurl never gets socket events), then tell libcurl they errored so
+        # it fails or re-registers whatever still used them; hold self._lock
+        for sock_fd in socks & (self.rlist | self.wlist):
+            try:
+                select.select([sock_fd], [], [], 0)
+            except (OSError, ValueError):
+                self.rlist.discard(sock_fd)
+                self.wlist.discard(sock_fd)
+                self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
 
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
