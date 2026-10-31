@@ -369,8 +369,10 @@ sources and sinks can now be non-blocking instead:
   event-loop pass; if the sink still cannot take it,
   receiving stays paused. If the transfer completes while a suffix is
   pending, completion is held back until the suffix is flushed, so the final
-  bytes are not lost. Pending data is dropped by `stop()`/`remove()` and
-  `Curl.reset()`. A sink that consumes everything behaves exactly as before.
+  bytes are not lost. If that flush fails, completion reports
+  `CURLE_WRITE_ERROR`. Pending data and queued resumes are dropped by
+  `stop()`/`remove()` and `Curl.reset()`. A sink that consumes everything
+  behaves exactly as before.
 - Resume from any thread with `curl.resume_upload()` (clears the paused read
   direction) or `curl.resume_download()` (clears the paused write direction),
   or the lower-level `MCurl.resume(curl, bitmask=None)` (`bitmask` is
