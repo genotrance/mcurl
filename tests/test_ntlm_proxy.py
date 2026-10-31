@@ -8,6 +8,7 @@ count towards MCurl.failed; only a handshake that ends in a final 407 does.
 """
 
 import base64
+import socket
 import socketserver
 import struct
 import sys
@@ -58,6 +59,7 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         self.drop_after_type2 = 0  # Complete type2 legs to close immediately afterwards
         self.drop_headers = 0  # Handshakes to cut off in the middle of the 407 headers
         self.refuse_after_close = refuse_after_close  # Stop listening after a 407 with Connection: close
+        self.refused = threading.Event()  # Listener was closed and a fresh connection was refused
         self.extra_headers = []  # Added to 200 responses
         self.lock = threading.Lock()
         self.challenges = 0  # 407 responses sent, intermediate or final
@@ -67,6 +69,17 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
     @property
     def url(self):
         return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def refuse_new_connections(self):
+        # A handler runs separately from serve_forever, so shutdown waits until
+        # the selector loop has stopped before closing the listening socket.
+        self.shutdown()
+        self.server_close()
+        try:
+            with socket.create_connection(self.server_address, timeout=1):
+                pass
+        except ConnectionRefusedError:
+            self.refused.set()
 
 
 class _NtlmHandler(socketserver.StreamRequestHandler):
@@ -148,11 +161,10 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
         if server.negotiate:
             offers.insert(0, "Proxy-Authenticate: Negotiate")
         close = kind == 3 or server.close_first
-        self._challenge(offers, close=close)
         if close and server.refuse_after_close:
-            # Close the listening socket so later connects are refused.
-            # shutdown(SHUT_RD) has that effect on Unix, but fails on Windows.
-            server.server_close()
+            # The next connection must fail, not race serve_forever's listener.
+            server.refuse_new_connections()
+        self._challenge(offers, close=close)
         return None if close else False
 
     def handle(self):
@@ -397,6 +409,7 @@ def test_407_close_then_refused_reconnect_is_inconclusive(ntlm_proxy, connect):
         for _ in range(multi.failure_threshold + 1):
             admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
             assert admitted and not ok
+            assert ntlm_proxy.refused.is_set()
             assert curl.cerr != 0 and curl.get_os_errno() != 0
             assert curl.resp == 502, (curl.cerr, curl.resp, curl.errstr)
             assert multi.failed.get(ntlm_proxy.url, 0) == 0
