@@ -4,7 +4,7 @@ requires = ["cffi", "jbb>=0.1.6", "setuptools"]
 
 [project]
 name = "pymcurl"
-version = "8.23.0.2"
+version = "8.23.0.3"
 description = "Manage outbound HTTP connections using Curl & CurlMulti"
 authors = [
   {name = "Ganesh Viswanathan", email = "dev@genotrance.com"}
@@ -60,7 +60,10 @@ enable = ["pypy"]
 skip = ["*-musllinux_i686", "cp314t-*", "pp*-macosx_*", "pp*-win_*"]
 before-build = "rm -rf {project}/build {project}/*.so {project}/_libcurl_cffi*"
 test-requires = ["pytest", "pytest-httpbin"]
-test-command = "pytest {project}/tests -q"
+test-command = "pytest {project}/tests -q -rs --import-mode=importlib -m smoke"
+# Every wheel is still built; the smoke selection runs only on the oldest and newest CPython, one free-threaded
+# build (cp315t) and one PyPy build (pp311). The abi3 wheel is identical across the skipped CPython versions.
+test-skip = ["cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*", "pp312-*"]
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "i686", "aarch64"]
@@ -111,6 +114,11 @@ ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+faulthandler_timeout = 120
+markers = [
+    "slow: burst, timeout and dead/slow connection tests that wait on real time; excluded by the fast selection, always run by an unfiltered pytest",
+    "smoke: short wheel smoke selection run by cibuildwheel on the installed wheel",
+]
 
 [tool.ruff]
 target-version = "py39"

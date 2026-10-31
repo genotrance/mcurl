@@ -26,6 +26,36 @@ def dprint(msg):
 mcurl.dprint = dprint
 
 
+class _ModuleView:
+    "Stand-in for a stdlib module inside mcurl only; unpatched attributes come from the real module"
+
+    def __init__(self, module):
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+@pytest.fixture
+def patch_mcurl(monkeypatch):
+    """Replace e.g. select.select or time.monotonic as seen by mcurl alone.
+
+    Patching the shared module (monkeypatch.setattr(mcurl.select, ...)) also
+    hijacks every other thread, including the session pytest-httpbin servers,
+    whose serve_forever() calls select.select() on Windows; a fake that raised
+    there killed httpbin_secure and later TLS tests timed out.
+    """
+
+    def patch(module, name, value):
+        view = getattr(mcurl, module)
+        if not isinstance(view, _ModuleView):
+            view = _ModuleView(view)
+            monkeypatch.setattr(mcurl, module, view)
+        setattr(view, name, value)
+
+    return patch
+
+
 def query(url, method="GET", data=None, check=False, insecure=False, debug=False, multi=None, encoding="utf-8"):
     ec = mcurl.Curl(url, method)
     ec.set_insecure(insecure)

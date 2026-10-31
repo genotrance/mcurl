@@ -92,8 +92,9 @@ different Python prefix than CPython.
 ### cibuildwheel configuration
 
 cibuildwheel is configured in `pyproject.toml` under `[tool.cibuildwheel]`.
-The build uses `build[uv]` as the frontend for speed. PyPy and PyPy-EOL
-builds are enabled for Linux only.
+The build uses `build[uv]` as the frontend for speed. Only the `pypy` enable
+group is on, so PyPy 3.11 and 3.12 are built and the PyPy-EOL versions are not.
+The skip list keeps PyPy off macOS and Windows, so PyPy wheels are Linux-only.
 
 Several configurations are skipped because they are unsupported or broken:
 
@@ -105,6 +106,13 @@ Several configurations are skipped because they are unsupported or broken:
   `CURLE_URL_MALFORMED` on every request. Linux PyPy is unaffected.
 - **Windows PyPy** — the mingw32 toolchain used for Windows builds is not
   compatible with PyPy on Windows.
+
+Every wheel is still built, but `test-command` runs only the `smoke` selection
+on a subset of identifiers; the others are build-only. The rationale, and why
+i686 CI runs the full suite instead, are in
+[docs/testing.md](testing.md#wheel-smoke-selection-and-test-skip). Running the
+full suite on every identifier repeated the same work for each wheel and
+dominated the release build time.
 
 `jsonschema<4.18` is pinned in the Linux-specific `test-requires` to prevent
 `rpds-py` (a Rust package with no PyPy wheel) from being pulled in via the
@@ -125,7 +133,9 @@ cache starts empty.
 For CPython, a `cp39-abi3` wheel is produced per platform/arch, compatible
 with any non-free-threaded CPython ≥ 3.9. A separate `cp315-cp315t` wheel is
 produced for free-threaded CPython 3.15 because it cannot use the stable ABI.
-For PyPy, a separate wheel is produced per PyPy version (Linux only).
+For PyPy, a separate wheel is produced per PyPy version (3.11 and 3.12, Linux
+only; see the table below and the
+[smoke selection](testing.md#wheel-smoke-selection-and-test-skip)).
 
 The macOS arm64 wheel requires macOS 15 or later. Since 8.23.0.1 it has been
 built on the `macos-15` runner and bundles Homebrew's curl dependency closure.
@@ -136,9 +146,9 @@ the sdist, which requires Homebrew curl matching the libcurl version.
 
 | Platform | Arch | CPython wheels | PyPy wheels | Notes |
 |----------|------|:--------------:|:-----------:|-------|
-| Linux (glibc) | x86_64 | 2 (abi3, cp315t) | 2 (pypy310, pypy311) | |
-| Linux (glibc) | i686 | 2 (abi3, cp315t) | 2 | |
-| Linux (glibc) | aarch64 | 2 (abi3, cp315t) | 2 | native ARM runner |
+| Linux (glibc) | x86_64 | 2 (abi3, cp315t) | 2 (pp311 smoke-tested, pp312 build-only) | |
+| Linux (glibc) | i686 | 2 (abi3, cp315t) | 2 (pp311 smoke-tested, pp312 build-only) | |
+| Linux (glibc) | aarch64 | 2 (abi3, cp315t) | 2 (pp311 smoke-tested, pp312 build-only) | native ARM runner |
 | Linux (musl) | x86_64 | 2 (abi3, cp315t) | — | no PyPy musl support |
 | Linux (musl) | aarch64 | 2 (abi3, cp315t) | — | native ARM runner, no PyPy musl support |
 | Windows | AMD64 | 2 (abi3, cp315t) | — | mingw32 incompatible with PyPy |
@@ -166,6 +176,7 @@ pre-merge operator gate and the release workflow.
 `uv.lock` is tracked in git so source checkouts and CI install reviewed
 dependency versions. CI, `make install` and `uv run` steps use `--locked`, so a
 stale lock fails loudly. Dependabot (`.github/dependabot.yml`, `uv` ecosystem)
-opens grouped minor/patch upgrade PRs. To upgrade manually, run
-`uv lock --upgrade` (or `uv lock --upgrade-package <name>`), run the tests,
-and commit `uv.lock`. The `jbb>=0.1.6` requirement is unchanged everywhere.
+opens grouped minor/patch upgrade PRs, with ignore rules for packages whose
+newer releases dropped Python 3.9 (see [Dependabot](ci.md#dependabot)). To
+upgrade manually, run `uv lock --upgrade` (or `uv lock --upgrade-package
+<name>`), run the tests, and commit `uv.lock`. The `jbb>=0.1.6` requirement is unchanged everywhere.

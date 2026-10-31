@@ -338,6 +338,7 @@ def _burst(multi, proxy, count=10):
     return admitted, len(results) - len(admitted)
 
 
+@pytest.mark.slow
 def test_concurrent_burst_sends_one_probe(proxy, multi):
     multi.set_auth_retry(0.3)
     _block(multi, proxy)

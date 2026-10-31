@@ -106,7 +106,7 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `buffer(data=None)` | Setup BytesIO buffers for `perform()`; pass `data` for upload (POST/PUT) bodies |
-| `bridge(client_rfile, client_wfile, client_hfile)` | Bridge curl reads/writes to file-like objects |
+| `bridge(client_rfile, client_wfile, client_hfile)` | Bridge curl reads/writes to file-like objects. The request body is streamed from `client_rfile` once, never buffered; `client_rfile` only needs `read()` (a `seekable()`/`seek()` source can be rewound), and may be non-blocking - see [Non-blocking bridge() sources](#non-blocking-bridge-sources). Call `set_headers()` afterwards with `Content-Length`, or `Transfer-Encoding: chunked` for an unknown length. See [Streamed request bodies](#streamed-request-bodies) |
 | `set_transfer_decoding(enable=False)` | Control transfer decoding (chunked, gzip); disable to let the client handle it |
 | `get_data(encoding="utf-8")` | Return response body from `buffer()` |
 | `get_headers(encoding="utf-8")` | Return response headers from `buffer()` |
@@ -119,6 +119,8 @@ with automatic Python-to-C type conversion.
 | `close()` | Release an auth-retry probe reservation held by this handle before it is run or reset |
 | `get_response()` | Return `(CURLcode, response_code)` of completed request; uses CONNECTCODE for CONNECT method |
 | `get_connect_response()` | Return `(CURLcode, HTTP status)` from a proxy CONNECT request |
+| `get_os_errno()` | Return the OS errno of any socket failure during the transfer, 0 if none; it is not cleared when a later connect attempt succeeds, so it does not say how the transfer ended |
+| `get_errorbuffer()` | Return libcurl's error message of the last failed operation (`CURLOPT_ERRORBUFFER`), empty if none |
 | `get_response_code()` | Return the HTTP response code (convenience, no CURLcode) |
 | `get_effective_url()` | Return the final URL after redirects |
 | `get_content_type()` | Return the Content-Type header value, or None |
@@ -127,6 +129,7 @@ with automatic Python-to-C type conversion.
 | `get_primary_ip()` | Return `(CURLcode, ip_string)` of the remote server |
 | `get_used_proxy()` | Return `(CURLcode, bool)` indicating whether a proxy was used |
 | `get_proxyauth_used()` | Return `(CURLcode, auth_bitmask)` for the proxy auth method that was negotiated |
+| `get_num_connects()` | Return `(CURLcode, count)` of successful connections created for the transfer |
 
 ### Authentication
 
@@ -169,7 +172,7 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `set_xferinfo(callback)` | Set transfer progress callback `fn(dltotal, dlnow, ultotal, ulnow) -> int` |
-| `set_seek(callback=None)` | Set seek callback `fn(offset, origin) -> int`; returns `CURL_SEEKFUNC_OK`(0)/`FAIL`(1)/`CANTSEEK`(2) |
+| `set_seek(callback=None)` | Set seek callback `fn(offset, origin) -> int`; returns `CURL_SEEKFUNC_OK`(0)/`FAIL`(1)/`CANTSEEK`(2). A rewind to offset 0 restores the declared Content-Length, so the body is resent across proxy auth legs; without a working seek, the Negotiate-to-NTLM retry of a request with a body is skipped (inconclusive, 503) |
 
 ### Handle duplication and lifecycle
 
@@ -179,6 +182,8 @@ with automatic Python-to-C type conversion.
 | `dup(url=None)` | Clone this handle into a new `Curl` instance with all libcurl options preserved - useful for template-based workflows |
 | `pause(bitmask)` | Pause send/receive on the handle |
 | `unpause()` | Resume all paused transfers |
+| `resume_upload(transfer_id=None)` | Thread-safe: resume a request body paused by a `bridge()` read source returning `CURL_READFUNC_PAUSE`; returns whether the request was queued. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
+| `resume_download(transfer_id=None)` | Thread-safe: resume a response paused by a `bridge()` write sink returning `CURL_WRITEFUNC_PAUSE`; returns whether the request was queued. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 
 ### Context manager
 
@@ -197,6 +202,7 @@ with mcurl.Curl("http://example.com") as c:
 |-----------|------|-------------|
 | `easy` | cffi handle | Underlying `CURL *` handle |
 | `easyhash` | str | Unique hash for dict keying |
+| `transfer_id` | int | Read-only identity of the transfer the handle is configured for; changes when `MCurl.remove()`/`stop()` or `reset()` ends it. Pass it to `resume_upload()`/`resume_download()`, see [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 | `url` | str | Request URL |
 | `method` | str | HTTP method |
 | `proxy` | str | Proxy host (if set) |
@@ -225,9 +231,9 @@ Pass a callable as `debug_print` to enable debug output (e.g. `MCurl(debug_print
 
 ### Proxy auth failures
 
-When a request with proxy auth configured receives a 407, the proxy's failure
-count increases; any other response resets it. Once the count reaches the
-failure threshold, `Curl.set_proxy()` returns `False` for that proxy. By
+When a request with proxy auth configured receives a final 407, the proxy's
+failure count increases; any other response resets it. Once the count reaches
+the failure threshold, `Curl.set_proxy()` returns `False` for that proxy. By
 default this lasts until `reset_proxy_failures()` is called. With an auth
 retry interval set, the first `set_proxy()` call after the interval becomes a
 probe while every other caller is still refused, so a burst of requests sends
@@ -241,6 +247,187 @@ probe per interval. Proxy CONNECT responses with status 407, including HTTPS
 proxy CONNECT failures, count as authentication failures. Stopped or
 callback-aborted probes, zero response codes, and non-407 CONNECT failures
 are inconclusive and do not count.
+
+NTLM and Negotiate are connection-bound. If libcurl closes after a complete
+NTLM type2 response and then resumes by sending type3 on a newly connected
+proxy socket, the resulting fresh 407 is not treated as a rejected login.
+`do()` retries that request once with a fresh, non-reusable connection and
+counts only the retry's final result. Requests with a body are retried only
+when its read callback can rewind to offset zero; otherwise the result is
+inconclusive (503). The detection combines libcurl's `NTLM handshake
+rejected` diagnostic with `CURLINFO_NUM_CONNECTS > 1`; the latter counts only
+successful connections, so failed happy-eyeballs addresses cannot conceal a
+genuine 407.
+
+With auth `ANY` on Linux/macOS, a proxy offering both Negotiate and NTLM
+makes libcurl pick Negotiate; without a Kerberos ticket, GSS-API fails to
+produce a token and libcurl surfaces the proxy's original 407 without ever
+trying NTLM. `do()` detects this case (`get_proxyauth_used()` returns
+`CURLAUTH_NEGOTIATE` on a final 407) and retries the request once with
+Negotiate removed from the auth mask, so the retry uses NTLM; only a failure
+of that retry counts towards the threshold. Windows SSPI already falls back
+to NTLM internally, so this never triggers there.
+
+### Streamed request bodies
+
+`bridge()` reads the request body from `client_rfile` through libcurl's read
+callback for every method that carries one (POST, PUT, PATCH, DELETE or any
+other verb). With `Content-Length` exactly that many bytes are streamed (short
+reads are fine); with `Transfer-Encoding: chunked` and no length the source is
+read until EOF and sent chunked. Before 8.23.0.3 a chunked body was silently
+dropped and PATCH copied the whole body into memory with
+`CURLOPT_COPYPOSTFIELDS`.
+
+A body source like px's client socket cannot rewind, yet proxy
+authentication may need several legs, and libcurl resends the body after any
+leg that ends in 407. mcurl therefore makes sure the body is only sent on a
+leg that can succeed:
+
+- `bridge()` installs a seek callback. A rewind to offset 0 succeeds when the
+  source is seekable or nothing has been read yet, otherwise it returns
+  `CURL_SEEKFUNC_CANTSEEK`, so libcurl never resends a partial body.
+- Proxy auth not known yet (no cached method for the proxy, or a mask with
+  several bits such as `ANY`, `NONEGOTIATE` or `ONLY*`): libcurl sends the
+  first leg without credentials and, without help, with the whole body. mcurl
+  sends `Expect: 100-continue`, so the proxy's 407 arrives before any body
+  byte. libcurl then closes that probe connection (one extra TCP connection)
+  and retries with the picked method. The picked method is cached even if
+  the request later fails, so the next upload starts the handshake upfront.
+- Known NTLM or Digest: on a fresh connection libcurl sends the first leg
+  with `Content-Length: 0` and the body only on the final leg. But mcurl
+  cannot tell from here whether this request will reuse a pooled connection
+  or open a fresh one, and on a connection libcurl believes is already
+  authenticated it skips that safe probe and sends the real request, body
+  included, right away. A proxy that does not keep connections alive after
+  each response - or one that simply let a pooled connection go idle and die
+  - turns that belief into a body sent on a connection that was already gone;
+  libcurl cannot tell this apart from a 407 until it tries to read the reply.
+  mcurl therefore keeps sending `Expect: 100-continue` for these too, paying
+  one extra round trip per request so a dead connection is caught before the
+  body goes out. Basic stays exempt: it is preemptive and stateless, so every
+  request carries full credentials regardless of the connection, and a dead
+  pooled connection just fails outright instead of eating the body.
+- Known Negotiate: libcurl always sends the body with the token, because it
+  considers Negotiate done after the first token. A single-leg Kerberos
+  exchange is fine, but Windows SSPI can fall back to NTLM inside SPNEGO and
+  need another leg, which would consume the body. mcurl sends
+  `Expect: 100-continue` for Negotiate too: a Kerberos proxy answers 100 and
+  the body follows on the same leg (one round trip), while a continuation
+  407 arrives before the body, so the failure is clean and the body is never
+  half-sent.
+- Seekable sources (`buffer()`, `set_seek()`) keep `Expect` suppressed and are
+  rewound by libcurl as needed.
+
+### Back-to-back uploads across connections
+
+px gives every client connection its own worker thread, all sharing one
+`MCurl`/`MCURL.proxyauth`. The Expect decision above is only safe if it
+matches what `set_auth()` actually configured on this handle via
+`CURLOPT_PROXYAUTH`: `_prepare_expect()` reads `self.auth`, never a fresh
+`MCURL.proxyauth` lookup, because a sibling upload on the same proxy can
+cache the method in the gap between this handle's `set_auth()` and its own
+`_prepare_expect()`, which would otherwise make this check trust a narrower
+method than the one actually installed on the handle and wrongly suppress
+Expect. The method is also cached the moment libcurl reports it - when the
+final response's headers finish, before any body byte reaches
+`client_wfile` - rather than only after the whole transfer completes, so a
+fast client that reacts to the first response byte cannot race ahead of the
+cache write for its next upload on the same proxy.
+
+Unsupported cases:
+
+- A non-seekable body, unknown auth, and a proxy that ignores `Expect` (no
+  100 or 407 within libcurl's 1 second wait): libcurl sends the body on the
+  probe leg and cannot resend it. `do()` reports resp 503 with the error text
+  `mcurl.REWIND_ERROR` ("Request body cannot be resent ..."), and the result
+  is inconclusive, never counted as an auth failure. The picked method is
+  cached, so retrying the request succeeds.
+
+### Non-blocking bridge() sources
+
+`read_callback` and `write_callback` used to run `client_rfile.read()` and
+`client_wfile.write()` inside `_socket_action()` while `MCurl._lock` was held,
+so a `client_rfile` whose `read()` blocks waiting for more data from its own
+client (for example a streaming request body fed from a socket) froze every
+other transfer on the same `MCurl` for as long as that read took. `bridge()`
+sources and sinks can now be non-blocking instead:
+
+- `client_rfile.read(n)` returns `None`, or raises `BlockingIOError`, to mean
+  "no data yet" without blocking. mcurl returns `CURL_READFUNC_PAUSE` to
+  libcurl, which pauses sending on that handle; no bytes are read or buffered.
+  EOF is unchanged: an empty `bytes` return (`b""`) ends the body as before.
+- `client_wfile.write(buf)` returns `None`, or raises `BlockingIOError`, to
+  mean the downstream client cannot accept more right now. mcurl returns
+  `CURL_WRITEFUNC_PAUSE`; libcurl buffers that chunk internally (not mcurl)
+  and redelivers it to `write_callback` once resumed.
+- `client_wfile.write(buf)` may also accept only part of the buffer
+  (`0 < n < len(buf)`, as a non-blocking socket does). libcurl treats a short
+  return from its write callback as an error, so mcurl instead keeps the
+  unwritten suffix in a per-handle pending buffer (at most one libcurl chunk,
+  so memory stays bounded), reports the whole chunk consumed and pauses
+  receiving. The suffix is written first, ahead of any new data, when the
+  handle is resumed (`resume_download()`), and mcurl also retries it on every
+  event-loop pass; if the sink still cannot take it,
+  receiving stays paused. If the transfer completes while a suffix is
+  pending, completion is held back until the suffix is flushed, so the final
+  bytes are not lost. If that flush fails, completion reports
+  `CURLE_WRITE_ERROR`. Pending data and queued resumes are dropped by
+  `stop()`/`remove()` and `Curl.reset()`. A sink that consumes everything
+  behaves exactly as before.
+- Resume from any thread with `curl.resume_upload()` (clears the paused read
+  direction) or `curl.resume_download()` (clears the paused write direction),
+  or the lower-level `MCurl.resume(curl, bitmask=None)` (`bitmask` is
+  `CURLPAUSE_SEND` and/or `CURLPAUSE_RECV`; `None` clears both). `curl_easy_pause()`
+  itself is only ever called by the thread currently driving the multi handle
+  inside `_perform()`, while it holds `MCurl._lock`, since libcurl documents
+  it as unsafe to call concurrently with a running transfer; `resume()` from
+  any other thread only records the request and wakes that thread (an
+  internal `socketpair()`, not `curl_multi_wakeup()`, since mcurl polls
+  sockets with `select()` directly rather than through `curl_multi_poll()`),
+  so a resume does not wait out the current `select()` timeout.
+- A resume belongs to one transfer, not to the `Curl` object. A `Curl` that is
+  reused (`remove()` or `stop()`, usually followed by `reset()`, then another
+  `do()`/`add()`) runs a new transfer, and a resume call can be delayed by
+  thread scheduling for any length of time, so when it finally executes mcurl
+  cannot tell from the call alone which transfer it was meant for. The caller
+  therefore names the transfer: read `curl.transfer_id` after configuring the
+  transfer and before starting it, and pass it to `resume_upload()`,
+  `resume_download()` or `MCurl.resume()`. The id stays the same for the whole
+  transfer, including the legs `do()` re-adds internally for a proxy-auth
+  retry, and changes only when `remove()`, `stop()`, `close()` or `reset()`
+  ends the transfer. The resume calls return `True` when the request was
+  queued and `False` when it was discarded: its transfer has ended (the id
+  is stale), or the handle is not running in the multi handle right now
+  (before `add()`, between the internal retry legs, or after removal), when
+  nothing of that transfer can be paused; the first read or write of a
+  starting transfer asks the source or sink anyway. The id check and the
+  queueing happen under the same lock that ends a transfer and drops its
+  queued resumes, so a request with a stale id can never clear a pause of a
+  later transfer, however late it runs and whether or not that transfer has
+  paused yet.
+- Without `transfer_id`, a resume is only unambiguous during the first
+  transfer of a `Curl` (no earlier transfer exists that it could belong to),
+  so the original no-argument calls keep working for a handle that is never
+  reused. Once the handle has been reused, a call without `transfer_id`
+  while it is running raises `ValueError` instead of guessing, since it may
+  be a late call for an earlier transfer; while it is not running it is
+  discarded as above.
+- A handle that is paused indefinitely still honours `CURLOPT_TIMEOUT` /
+  `set_timeout()` (the timer that drives it is independent of pause state) and
+  is removed cleanly by `remove()`/`stop()`; neither waits for the source. A
+  source that fails while paused never gets another callback until resumed or
+  removed, so the caller ends the transfer itself (`stop()`) once it knows the
+  source failed, rather than it hanging forever.
+- Only meaningful with the multi interface (`MCurl.do()`/`add()`); pausing a
+  handle run through the easy interface (`Curl.perform()`, `is_easy=True`)
+  blocks the calling thread with no event loop to resume it from, so a
+  non-blocking source should not be used that way.
+- Remaining limit: a resume is only guaranteed to cut short an in-progress
+  `select()` wait on that handle's own sockets. A handle with no socket
+  registered yet (the brief window before it connects) and a pending libcurl
+  timer falls back to a plain `time.sleep()` that a resume does not
+  interrupt; this never applies to an already-connected, paused upload or
+  download, which always has a registered socket.
 
 ### Static methods
 
@@ -260,6 +447,7 @@ are inconclusive and do not count.
 | `do(curl)` | Add a `Curl` handle and perform until completion; returns `True` on success |
 | `remove(curl)` | Remove a completed `Curl` handle from the multi instance |
 | `stop(curl)` | Abort a running `Curl` handle and remove it from the multi instance |
+| `resume(curl, bitmask=None, transfer_id=None)` | Thread-safe: queue `curl` to resume a paused direction (`CURLPAUSE_SEND` and/or `CURLPAUSE_RECV`; `None` clears both) of the transfer `transfer_id` and wake the thread driving the multi handle; returns `True` if queued, `False` if discarded. See [Non-blocking bridge() sources](#non-blocking-bridge-sources) |
 | `select(curl, client_sock, idle=30)` | Run a bidirectional select loop between a client socket and a CONNECT tunnel |
 | `close()` | Stop all running transfers and close the multi handle |
 

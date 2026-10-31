@@ -1,6 +1,7 @@
 """Manage outbound HTTP connections using Curl & CurlMulti"""
 
 import collections
+import contextlib
 import io
 import os.path
 import platform
@@ -37,9 +38,18 @@ MCURL = None
 KEEPALIVE_IDLE = 30
 KEEPALIVE_INTERVAL = 10
 KEEPALIVE_COUNT = 3
+ERROR_BUFFER_SIZE = 256  # CURL_ERROR_SIZE
+TUNNEL_407 = "CONNECT tunnel failed, response 407"  # libcurl message for a final CONNECT 407
+NTLM_RECONNECT_REJECTED = "NTLM handshake rejected"
+# do() error text for CURLE_SEND_FAIL_REWIND (inconclusive, not an auth failure)
+REWIND_ERROR = (
+    "Request body cannot be resent: it was sent on a proxy authentication leg "
+    "and the body source cannot rewind (proxy ignored Expect: 100-continue?); "
+)
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
 MULTI_SELECT_TIMEOUT = 1.0
+PENDING_WRITE_SELECT_TIMEOUT = 0.01
 
 __all__ = [
     "Curl",
@@ -166,18 +176,26 @@ def debug_callback(easy, infotype, data, size, userp):
 
     del userp
     easyhash = gethash(easy)
-    curl = MCURL.handles[easyhash]
+    curl = MCURL.handles.get(easyhash)
+    if curl is None:
+        return libcurl.CURLE_OK
     if infotype == libcurl.CURLINFO_TEXT:
-        prefix = easyhash + ": Curl info: "
-    elif infotype == libcurl.CURLINFO_HEADER_IN:
+        for msg in yield_msgs(data, size):
+            if NTLM_RECONNECT_REJECTED in msg:
+                curl._ntlm_reconnect_rejected = True
+            if curl._debug:
+                dprint(easyhash + ": Curl info: " + sanitized(msg))
+        return libcurl.CURLE_OK
+    if infotype == libcurl.CURLINFO_HEADER_IN:
         prefix = easyhash + ": Received header <= "
     elif infotype == libcurl.CURLINFO_HEADER_OUT:
         prefix = easyhash + ": Sent header => "
     else:
         return libcurl.CURLE_OK
 
-    for msg in yield_msgs(data, size):
-        dprint(prefix + sanitized(msg))
+    if curl._debug:
+        for msg in yield_msgs(data, size):
+            dprint(prefix + sanitized(msg))
 
     return libcurl.CURLE_OK
 
@@ -186,24 +204,37 @@ def debug_callback(easy, infotype, data, size, userp):
 def read_callback(buffer, size, nitems, userdata):
     tsize = size * nitems
     curl = MCURL.handles[cvp2pystr(userdata)]
+    # Known length: read at most the remaining bytes; chunked: read until EOF
     if curl.size is not None:
-        if curl.size > tsize:
-            curl.size -= tsize
-        else:
-            tsize = curl.size
-            curl.size = None
+        tsize = min(tsize, curl.size)
+    elif not curl._chunked:
+        tsize = 0
+    if tsize > 0:
         if curl.client_rfile is not None:
             try:
                 data = curl.client_rfile.read(tsize)
-                ffi.memmove(buffer, data, tsize)
+            except BlockingIOError:
+                # No data yet; pause sending and resume once the source has some
+                dprint(curl.easyhash + ": Read would block, pausing")
+                curl._pause_mask |= libcurl.CURLPAUSE_SEND
+                return libcurl.CURL_READFUNC_PAUSE
             except ConnectionError as exc:
                 dprint(curl.easyhash + ": Error reading from client: " + str(exc))
-                tsize = 0
+                data = b""
+            if data is None:
+                # No data yet; pause sending and resume once the source has some
+                dprint(curl.easyhash + ": Read would block, pausing")
+                curl._pause_mask |= libcurl.CURLPAUSE_SEND
+                return libcurl.CURL_READFUNC_PAUSE
+            # read() may return fewer bytes than asked for
+            tsize = min(len(data), tsize)
+            ffi.memmove(buffer, data, tsize)
+            curl._body_read += tsize
+            if curl.size is not None:
+                curl.size -= tsize
         else:
             dprint(curl.easyhash + ": Read expected but no client")
             tsize = 0
-    else:
-        tsize = 0
 
     dprint(curl.easyhash + ": Read %d bytes" % tsize)
     return tsize
@@ -216,11 +247,39 @@ def write_callback(buffer, size, nitems, userdata):
     if tsize > 0:
         if curl.sentheaders:
             if curl.client_wfile is not None:
+                if curl._wfail:
+                    return 0
+                # Earlier bytes must reach the sink first to preserve order
+                if curl._wpending and not curl._flush_pending():
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    return libcurl.CURL_WRITEFUNC_PAUSE
+                if curl._wfail:
+                    return 0
                 try:
-                    tsize = curl.client_wfile.write(ffi.buffer(buffer, tsize))
+                    written = curl.client_wfile.write(ffi.buffer(buffer, tsize))
+                except BlockingIOError:
+                    # Downstream not ready; pause receiving and resume once it is
+                    dprint(curl.easyhash + ": Write would block, pausing")
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    return libcurl.CURL_WRITEFUNC_PAUSE
                 except ConnectionError as exc:
                     dprint(curl.easyhash + ": Error writing to client: " + str(exc))
                     return 0
+                if written is None:
+                    # Downstream not ready; pause receiving and resume once it is
+                    dprint(curl.easyhash + ": Write would block, pausing")
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    return libcurl.CURL_WRITEFUNC_PAUSE
+                if 0 < written < tsize:
+                    # Partial write: libcurl treats a short return as an error,
+                    # so keep the suffix (at most one chunk) and pause until
+                    # it has been flushed
+                    dprint(curl.easyhash + ": Partial write %d of %d bytes, pausing" % (written, tsize))
+                    curl._wpending = bytes(ffi.buffer(buffer, tsize))[written:]
+                    curl._pause_mask |= libcurl.CURLPAUSE_RECV
+                    libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
+                    return tsize
+                tsize = written
             else:
                 dprint(curl.easyhash + ": Ignored %d bytes" % tsize)
                 return tsize
@@ -230,6 +289,12 @@ def write_callback(buffer, size, nitems, userdata):
 
     # dprint(curl.easyhash + ": Wrote %d bytes" % tsize)
     return tsize
+
+
+def _is_407_status_line(data):
+    "True if data is an HTTP status line (HTTP/x.x 407 ...)"
+    parts = data.split(None, 2)
+    return len(parts) >= 2 and parts[0].startswith(b"HTTP/") and parts[1] == b"407"
 
 
 @ffi.def_extern()
@@ -249,8 +314,13 @@ def header_callback(buffer, size, nitems, userdata):
                 # Done sending headers
                 dprint(curl.easyhash + ": Done sending headers")
                 curl.sentheaders = True
-            elif curl.auth is not None and data[0] == 72 and b"407" in data:
-                # Header starts with H and has 407 - HTTP/x.x 407 (issue #148)
+                # Cache the proxy auth method now, before write_callback can
+                # hand any response byte to client_wfile: a client fast enough
+                # to react to that first byte must never see a request for the
+                # same proxy still treat the method as unknown (px#T59f5c606)
+                curl._cache_proxy_auth()
+            elif curl.auth is not None and _is_407_status_line(data):
+                # HTTP status line with status code 407 (issue #148)
                 # Px is configured to authenticate so don't send auth related
                 # headers from upstream proxy to client
                 dprint(curl.easyhash + ": Suppressing headers")
@@ -280,17 +350,7 @@ def xferinfo_callback(clientp, dltotal, dlnow, ultotal, ulnow):
 @ffi.def_extern()
 def seek_callback(clientp, offset, origin):
     curl = MCURL.handles[cvp2pystr(clientp)]
-    if curl._seek_fn is not None:
-        return curl._seek_fn(offset, origin)
-    # Default: seek on client_rfile if it supports seeking
-    if curl.client_rfile is not None and hasattr(curl.client_rfile, "seek"):
-        try:
-            curl.client_rfile.seek(offset, origin)
-        except (OSError, ValueError):
-            return libcurl.CURL_SEEKFUNC_FAIL
-        else:
-            return libcurl.CURL_SEEKFUNC_OK
-    return libcurl.CURL_SEEKFUNC_CANTSEEK
+    return curl._seek(offset, origin)
 
 
 class Curl:
@@ -301,6 +361,31 @@ class Curl:
     easyhash = None
     ceasyhash = ffi.NULL
     sock_fd = None
+
+    # Declared request body length, kept so the body can be resent after a rewind
+    _content_length = None
+    # Body has unknown length and is streamed until EOF (Transfer-Encoding: chunked)
+    _chunked = False
+    # Bytes read from client_rfile since the last rewind
+    _body_read = 0
+    # Expect header still to be chosen by _prepare_expect()
+    _expect_pending = False
+    # CURLPAUSE_SEND/CURLPAUSE_RECV bits currently paused on this handle
+    _pause_mask = 0
+    # Identifies the transfer this handle is configured for (transfer_id);
+    # bumped when a transfer ends for good (MCurl.remove()/stop(), reset()) so
+    # a resume() captured for an earlier transfer can be told apart from one
+    # for a later reuse of the same handle
+    _transfer_id = 0
+    # True from the end of MCurl._add_handle() until the handle leaves the
+    # multi handle or is reset; resume() is only queued while it is set
+    _active = False
+    # Unwritten suffix of a chunk client_wfile.write() accepted only partially
+    _wpending = b""
+    # client_wfile failed while flushing _wpending; abort on next write
+    _wfail = False
+    # CURLMSG_DONE result held back until _wpending has been flushed
+    _wdone = None
 
     # For plain HTTP
     client_rfile = None
@@ -342,6 +427,10 @@ class Curl:
     # Proxy for which this handle holds the auth retry probe slot
     _probe_proxy = None
     _stopped = False
+    _negotiate_retried = False
+    _ntlm_reconnect_rejected = False
+    _ntlm_reconnect_retried = False
+    _debug = False
 
     @staticmethod
     def strerror(code):
@@ -392,9 +481,20 @@ class Curl:
         self._keepalive.append(cobj)
         return cobj
 
+    def _set_errorbuffer(self):
+        "Give this handle its own libcurl error buffer (libcurl keeps only the message of the last failure)"
+        self._errbuf = ffi.new("char[]", ERROR_BUFFER_SIZE)
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_ERRORBUFFER, self._errbuf)
+
+    def get_errorbuffer(self):
+        "Return the libcurl error message of the last failed operation, empty if none"
+        return ffi.string(self._errbuf).decode("utf-8", "replace")
+
     def _setup(self, url, method, request_version, connect_timeout):
         "Setup curl instance based on request info"
         dprint(self.easyhash + ": %s %s using %s" % (method, url, request_version))
+
+        self._set_errorbuffer()
 
         # Ignore proxy environment variables
         libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_PROXY, self._keepstr(""))
@@ -461,6 +561,28 @@ class Curl:
             self.easy, libcurl.CURLOPT_HTTP_VERSION, py2clong(getattr(libcurl, "CURL_HTTP_VERSION_" + version))
         )
 
+    def _clear_write_state(self):
+        self._wpending = b""
+        self._wfail = False
+        self._wdone = None
+
+    def _flush_pending(self):
+        "Write the pending suffix to client_wfile; True once nothing is left. Must run on the driving thread."
+        while self._wpending:
+            try:
+                written = self.client_wfile.write(self._wpending)
+            except BlockingIOError:
+                return False
+            except ConnectionError as exc:
+                dprint(self.easyhash + ": Error writing to client: " + str(exc))
+                self._wpending = b""
+                self._wfail = True
+                return True
+            if not written:
+                return False
+            self._wpending = self._wpending[written:]
+        return True
+
     def reset(self, url, method="GET", request_version="HTTP/1.1", connect_timeout=60):
         """Reuse existing curl instance for another request.
 
@@ -473,8 +595,13 @@ class Curl:
         dprint(self.easyhash + ": Resetting curl")
         if self._probe_proxy is not None:
             MCURL._release_probe(self)
+        if MCURL is not None:
+            MCURL._drop_pending_resume(self, end=True)
+        else:
+            self._transfer_id += 1
         libcurl.curl_easy_reset(self.easy)
         self.sock_fd = None
+        self._clear_write_state()
 
         self.client_rfile = None
         self.client_wfile = None
@@ -483,6 +610,11 @@ class Curl:
         self.auth = None
         self.proxy = None
         self.size = None
+        self._content_length = None
+        self._chunked = False
+        self._body_read = 0
+        self._expect_pending = False
+        self._pause_mask = 0
         self.user = None
         self.xheaders = None
         self._keepalive = []
@@ -491,6 +623,10 @@ class Curl:
 
         self.cerr = libcurl.CURLE_OK
         self._stopped = False
+        self._negotiate_retried = False
+        self._ntlm_reconnect_rejected = False
+        self._ntlm_reconnect_retried = False
+        self._debug = False
         self.done = False
         self.errstr = ""
         self.resp = 503
@@ -572,10 +708,127 @@ class Curl:
                 # Proxy + auth so tunnel and authenticate
                 self.set_tunnel()
 
+    def _seek(self, offset, origin):
+        "Seek the request body source; a rewind to the start restores the read budget"
+        if self._seek_fn is not None:
+            ret = self._seek_fn(offset, origin)
+        elif self._source_seekable():
+            try:
+                self.client_rfile.seek(offset, origin)
+            except (OSError, ValueError):
+                return libcurl.CURL_SEEKFUNC_FAIL
+            ret = libcurl.CURL_SEEKFUNC_OK
+        elif offset == 0 and origin == 0 and self._body_read == 0:
+            # Nothing consumed yet from a streaming source: already at the start
+            ret = libcurl.CURL_SEEKFUNC_OK
+        else:
+            # Never resend a partial body from a source that cannot rewind
+            return libcurl.CURL_SEEKFUNC_CANTSEEK
+        if ret == libcurl.CURL_SEEKFUNC_OK and offset == 0 and origin == 0:
+            self._body_read = 0
+            if self._content_length is not None:
+                self.size = self._content_length
+        return ret
+
+    def _source_seekable(self):
+        "True if client_rfile can rewind (seekable(), or seek() if it has no seekable())"
+        rfile = self.client_rfile
+        if rfile is None or not hasattr(rfile, "seek"):
+            return False
+        seekable = getattr(rfile, "seekable", None)
+        if seekable is None:
+            return True
+        try:
+            return bool(seekable())
+        except (OSError, ValueError):
+            return False
+
+    def _can_rewind(self):
+        "True if the request body can be resent after libcurl consumed part of it"
+        return self._seek_fn is not None or self._source_seekable()
+
+    def _prepare_expect(self):
+        """
+        Pick the Expect header for a known-length body just before the transfer.
+
+        A streamed body that cannot rewind must not go out on a proxy auth leg
+        that ends in 407, or on a connection libcurl believed was still good
+        and was not. Basic is preemptive and stateless - every request carries
+        full credentials regardless of the connection, so a dead pooled
+        connection just fails the whole request cleanly - and stays exempt.
+        Every other case keeps "Expect: 100-continue": when the method is not
+        known yet (several bits such as ANY), when it is Negotiate (whose
+        token leg always carries the body, and SSPI SPNEGO can need more
+        legs), and also when it is a known NTLM or Digest - connection-bound
+        methods for which libcurl, on a connection it believes is already
+        authenticated, skips the safe Content-Length: 0 probe and sends the
+        real request immediately. mcurl cannot tell from here whether this
+        handle will reuse a pooled connection or open a fresh one, and a
+        proxy that does not keep connections alive after each response (or
+        one that simply let a pooled one go idle and die) turns that belief
+        into a body sent on a connection that was already gone, which cannot
+        be told apart from a 407 until libcurl tries to read the reply.
+
+        The decision must use self.auth, exactly what set_auth() configured
+        via CURLOPT_PROXYAUTH, rather than re-reading MCURL.proxyauth here: a
+        concurrent request for the same proxy can cache the method in the gap
+        between this handle's set_auth() and this call, which would make this
+        check see a single resolved method while the handle itself still has
+        the broader, unresolved mask installed - concluding Expect can be
+        suppressed when libcurl was never told to narrow its own behaviour.
+        """
+        if not self._expect_pending:
+            return
+        self._expect_pending = False
+        line = "Expect:"
+        if (
+            self.proxy is not None
+            and self.auth is not None
+            and not self.is_connect
+            and self.client_rfile is not None
+            and not self._can_rewind()
+            and self.auth != libcurl.CURLAUTH_BASIC
+        ):
+            line = "Expect: 100-continue"
+        dprint(self.easyhash + ": Adding header => " + line)
+        self.headers = libcurl.curl_slist_append(self.headers, py2cstr(line))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_HTTPHEADER, self.headers)
+
+    def _enable_body(self, size):
+        """
+        Send the request body through the read callback; size -1 is unknown
+        (chunked). POST, PUT, PATCH and any other method share this path, so
+        the body is streamed from client_rfile and never copied in memory.
+        Returns True if a body will be sent.
+        """
+        if self.is_upload:
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_INFILESIZE, py2clong(size))
+            return True
+        if not self.is_post:
+            if size == 0:
+                # Nothing to stream; keep the method as it is
+                return False
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POST, py2cbool(True))
+            # CURLOPT_POST would turn GET into POST, so keep the method verb
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_CUSTOMREQUEST, self._keepstr(self.method))
+        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POSTFIELDSIZE, py2clong(size))
+        return True
+
     def set_headers(self, xheaders):
         "Set request headers from a dict of {name: value} pairs"
         self.headers = ffi.NULL
+        self._expect_pending = False
         skip_proxy_headers = True if self.proxy is not None and self.auth is not None else False
+        lcheaders = {header.lower(): str(xheaders[header]) for header in xheaders}
+        has_body = (self.is_upload or self.is_post or self.client_rfile is not None) and not self.is_connect
+        if (
+            has_body
+            and "content-length" not in lcheaders
+            and "chunked" in lcheaders.get("transfer-encoding", "").lower()
+        ):
+            # Unknown length: stream the body until EOF with chunked encoding
+            self._chunked = True
+            self._expect_pending = self._enable_body(-1) and "expect" not in lcheaders
         for header in xheaders:
             lcheader = header.lower()
             if skip_proxy_headers and lcheader.startswith("proxy-"):
@@ -585,24 +838,17 @@ class Curl:
                 continue
             elif lcheader == "content-length":
                 size = int(xheaders[header])
-                if self.is_upload or self.is_post:
-                    # Save content-length for PUT/POST later
-                    # Turn off Transfer-Encoding since size is known
+                if has_body:
+                    # Save content-length so the read callback streams exactly
+                    # this many bytes; turn off Transfer-Encoding since size is
+                    # known and pick Expect just before the transfer
                     self.size = size
+                    self._content_length = size
+                    self._chunked = False
                     self.headers = libcurl.curl_slist_append(self.headers, py2cstr("Transfer-Encoding:"))
-                    self.headers = libcurl.curl_slist_append(self.headers, py2cstr("Expect:"))
-                    if self.is_post:
-                        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_POSTFIELDSIZE, py2clong(size))
-                    else:
-                        libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_INFILESIZE, py2clong(size))
-                elif self.is_patch:
-                    # Get data from client - libcurl doesn't seem to use READFUNCTION
-                    try:
-                        data = self.client_rfile.read(size)
-                    except AttributeError as exc:
-                        dprint("set_headers() called before buffer()/bridge()?")
-                        raise exc
-                    libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_COPYPOSTFIELDS, py2custr(data))
+                    self._expect_pending = self._enable_body(size) and "expect" not in lcheaders
+            elif lcheader == "transfer-encoding" and has_body and "content-length" in lcheaders:
+                continue
             elif lcheader == "user-agent":
                 # Forward user agent via setopt
                 self.set_useragent(xheaders[header])
@@ -632,6 +878,7 @@ class Curl:
     def set_debug(self, enable=True):
         "Enable verbose mode with debug callback routed through dprint()"
         if enable:
+            self._debug = True
             self.set_verbose()
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
 
@@ -650,6 +897,9 @@ class Curl:
             self.client_rfile = client_rfile
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_READFUNCTION, libcurl.read_callback)
             libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_READDATA, self.ceasyhash)
+            # Rewinds succeed only if the source can seek or nothing was read yet
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SEEKFUNCTION, libcurl.seek_callback)
+            libcurl.curl_easy_setopt(self.easy, libcurl.CURLOPT_SEEKDATA, self.ceasyhash)
 
         if client_wfile is not None:
             self.client_wfile = client_wfile
@@ -961,6 +1211,7 @@ class Curl:
         new._keepalive = []
         new._xferinfo_fn = None
         new._seek_fn = None
+        new._set_errorbuffer()
         new.ceasyhash = new._keepstr(new.easyhash)
 
         # Copy Python-level state
@@ -985,12 +1236,21 @@ class Curl:
         new.client_wfile = None
         new.client_hfile = None
         new.size = None
+        new._content_length = None
+        new._chunked = False
+        new._body_read = 0
+        new._expect_pending = False
         new.cerr = libcurl.CURLE_OK
         new.done = False
         new.errstr = ""
         new.resp = 503
         new.sentheaders = False
         new.suppress = False
+        new._stopped = False
+        new._negotiate_retried = False
+        new._ntlm_reconnect_rejected = False
+        new._ntlm_reconnect_retried = False
+        new._debug = False
         new.is_connect = False
         new.is_patch = False
         new.is_post = False
@@ -1014,6 +1274,41 @@ class Curl:
     def unpause(self):
         "Resume all paused transfers on this handle"
         return libcurl.curl_easy_pause(self.easy, libcurl.CURLPAUSE_CONT)
+
+    @property
+    def transfer_id(self):
+        """Identity of the transfer this handle is configured for.
+
+        Capture it after configuring a transfer and before starting it, and
+        pass it to resume_upload()/resume_download() so a late resume cannot
+        reach a later transfer that reuses this handle. It changes once the
+        transfer ends for good: MCurl.remove()/stop() or reset().
+        """
+        return self._transfer_id
+
+    def resume_upload(self, transfer_id=None):
+        """Thread-safe: resume a request body paused by read_callback returning CURL_READFUNC_PAUSE.
+
+        Call this from any thread once client_rfile.read() has more data (or
+        EOF) to give; see bridge() in the Streamed request bodies docs for the
+        non-blocking read() contract. Only meaningful for a handle driven
+        through MCurl.do()/add() (the multi interface). See MCurl.resume() for
+        transfer_id and the return value.
+        """
+        if MCURL is None:
+            return False
+        return MCURL.resume(self, libcurl.CURLPAUSE_SEND, transfer_id)
+
+    def resume_download(self, transfer_id=None):
+        """Thread-safe: resume a response paused by write_callback returning CURL_WRITEFUNC_PAUSE.
+
+        Call this from any thread once client_wfile.write() can accept more
+        data. Only meaningful for a handle driven through MCurl.do()/add().
+        See MCurl.resume() for transfer_id and the return value.
+        """
+        if MCURL is None:
+            return False
+        return MCURL.resume(self, libcurl.CURLPAUSE_RECV, transfer_id)
 
     # Transfer progress callback (section 12)
 
@@ -1090,6 +1385,7 @@ class Curl:
         # However, add easyhash to MCURL.handles since it is used in curl callbacks
         with MCURL._lock:
             MCURL.handles[self.easyhash] = self
+        self._prepare_expect()
         self.cerr = libcurl.curl_easy_perform(self.easy)
         if self.cerr != libcurl.CURLE_OK:
             dprint(self.easyhash + ": Connection failed: " + Curl.strerror(self.cerr) + "; " + self.errstr)
@@ -1114,6 +1410,18 @@ class Curl:
         codep = ffi.new("long *")
         ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_HTTP_CONNECTCODE, codep)
         return ret, codep[0]
+
+    def get_os_errno(self):
+        "Return the OS errno of any socket failure during the transfer, 0 if none"
+        codep = ffi.new("long *")
+        libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_OS_ERRNO, codep)
+        return codep[0]
+
+    def get_num_connects(self):
+        "Return (CURLcode, number of successful connections made for the transfer)"
+        connects = ffi.new("long *")
+        ret = libcurl.curl_easy_getinfo(self.easy, libcurl.CURLINFO_NUM_CONNECTS, connects)
+        return ret, connects[0]
 
     def get_activesocket(self):
         "Return (CURLcode, socket_fd) for this handle's active connection"
@@ -1168,9 +1476,24 @@ class Curl:
             val = val.decode(encoding)
         return val
 
+    def _cache_proxy_auth(self):
+        "Cache the proxy auth method libcurl just reported, if not already cached"
+        if self.auth is None or self.proxy is None or self.proxy in MCURL.proxyauth:
+            return
+        ret, proxyauth_used = self.get_proxyauth_used()
+        if ret == libcurl.CURLE_OK and proxyauth_used != 0:
+            MCURL.proxyauth[self.proxy] = proxyauth_used
+            self.auth = proxyauth_used
+            dprint(f"{self.easyhash}: Caching proxy auth method: {self.proxy} {proxyauth_used}")
+
     def _save_auth(self):
-        "Find and cache proxy auth method used by libcurl"
-        if self.auth is None or self.cerr != libcurl.CURLE_OK:
+        "Find and cache proxy auth method used by libcurl, as a fallback for header_callback"
+        # A failed rewind still learned the method on the probe leg: cache it
+        # so the next upload starts the handshake upfront. header_callback
+        # cannot do this itself since a rewind failure is only detected after
+        # headers complete, when libcurl tries and fails to resend the body.
+        rewind_failed = self.cerr == libcurl.CURLE_SEND_FAIL_REWIND
+        if self.auth is None or (self.cerr != libcurl.CURLE_OK and not rewind_failed):
             # No need to check auth
             # - No auth requested - client will authenticate directly
             # - libcurl errror encountered
@@ -1181,28 +1504,24 @@ class Curl:
             dprint(f"{self.easyhash}: Proxy auth method already cached")
             return
 
-        ret, proxyauth_used = self.get_proxyauth_used()
-        if ret == libcurl.CURLE_OK:
-            if proxyauth_used != 0:
-                # Cache auth mthod used by libcurl
-                MCURL.proxyauth[self.proxy] = proxyauth_used
-                self.auth = proxyauth_used
-                dprint(f"{self.easyhash}: Caching proxy auth method: {self.proxy} {proxyauth_used}")
-            else:
-                dprint(f"Proxy auth method not yet used: {self.auth}")
-        else:
-            dprint(f"Failed to get proxy auth method: {ret}")
+        ret, code = self.get_response()
+        if not rewind_failed and (ret != libcurl.CURLE_OK or code in (0, 407)):
+            # No response or the proxy rejected the auth method used - not worth caching
+            dprint(f"{self.easyhash}: Not caching proxy auth method: response {code}")
+            return
+
+        self._cache_proxy_auth()
 
 
 @ffi.def_extern()
 def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
     # libcurl socket callback: add/remove actions for socket events
     del easy, userp, socketp
-    if ev_bitmask & libcurl.CURL_POLL_IN or ev_bitmask & libcurl.CURL_POLL_INOUT:
+    if ev_bitmask & libcurl.CURL_POLL_IN:
         # dprint("Read sock_fd %d" % sock_fd)
         MCURL.rlist.add(sock_fd)
 
-    if ev_bitmask & libcurl.CURL_POLL_OUT or ev_bitmask & libcurl.CURL_POLL_INOUT:
+    if ev_bitmask & libcurl.CURL_POLL_OUT:
         # dprint("Write sock_fd %d" % sock_fd)
         MCURL.wlist.add(sock_fd)
 
@@ -1216,13 +1535,14 @@ def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
 
 @ffi.def_extern()
 def multi_timer_callback(multi, timeout_ms, userp):
-    # libcurl timer callback: schedule/cancel a timeout action
+    # libcurl gives a relative timeout; retain its monotonic deadline so time
+    # spent handling another event cannot make a later select() oversleep.
     # dprint("timeout = %d" % timeout_ms)
     del multi, userp
     if timeout_ms == -1:
         MCURL.timer = None
     else:
-        MCURL.timer = timeout_ms / 1000.0
+        MCURL.timer = time.monotonic() + timeout_ms / 1000.0
 
     return libcurl.CURLE_OK
 
@@ -1271,7 +1591,7 @@ class MCurl:
     handles = None
     proxyauth = None
     failed = None  # Proxy servers with auth failures
-    timer = None
+    timer = None  # Monotonic deadline requested by libcurl
     rlist = None
     wlist = None
 
@@ -1322,6 +1642,15 @@ class MCurl:
         self._blocked = {}  # proxy -> (blocked since monotonic time, interval)
         self._probe = {}  # proxy -> easyhash of in-flight probe
 
+        # resume() from a foreign thread only queues; the thread driving the
+        # multi handle under self._lock is the only one allowed to call
+        # curl_easy_pause(). _wake_w interrupts a select() blocked on sockets.
+        self._resume_lock = threading.Lock()
+        self._pending_resume = {}  # easyhash -> CURLPAUSE_* bits to clear
+        self._wake_r, self._wake_w = socket.socketpair()
+        self._wake_r.setblocking(False)
+        self._wake_w.setblocking(False)
+
     def setopt(self, option, value):
         "Configure a multi option (socket/timer callbacks are reserved by mcurl)"
         if option in (libcurl.CURLMOPT_SOCKETFUNCTION, libcurl.CURLMOPT_TIMERFUNCTION):
@@ -1361,10 +1690,12 @@ class MCurl:
                 self.failed.clear()
                 self._blocked.clear()
                 self._probe.clear()
+                self.proxyauth.clear()
             else:
                 self.failed.pop(proxy, None)
                 self._blocked.pop(proxy, None)
                 self._probe.pop(proxy, None)
+                self.proxyauth.pop(proxy, None)
 
     def _admit_proxy(self, curl, proxy):
         # Decide whether curl may use proxy given its auth failure state
@@ -1412,6 +1743,8 @@ class MCurl:
                 return
             interval = self._blocked.get(proxy, (0, self.auth_retry))[1]
             if auth_failed:
+                # Forget the cached auth method so a different one can be tried
+                self.proxyauth.pop(proxy, None)
                 self.failed[proxy] = self.failed.get(proxy, 0) + 1
                 if self.failed[proxy] < self.failure_threshold:
                     return
@@ -1448,10 +1781,111 @@ class MCurl:
                 # Always true since only one msg type
                 easyhash = gethash(msg.easy_handle)
                 curl = self.handles[easyhash]
-                curl.done = True
+                if curl._wpending and not curl._flush_pending():
+                    # Final bytes still waiting for the sink: finish later
+                    curl._wdone = msg.data.result
+                    continue
+                self._finish(curl, msg.data.result)
 
-                if msg.data.result != libcurl.CURLE_OK:
-                    curl.cerr = msg.data.result
+    @staticmethod
+    def _finish(curl, result):
+        curl._wdone = None
+        curl.done = True
+        if curl._wfail:
+            result = libcurl.CURLE_WRITE_ERROR
+        if result != libcurl.CURLE_OK:
+            curl.cerr = result
+
+    def _flush_pending_writes(self):
+        # Retry every pending write suffix, resume receiving once flushed and
+        # complete handles whose CURLMSG_DONE waited on one; hold self._lock
+        advanced = False
+        for curl in list(self.handles.values()):
+            if not curl._wpending and curl._wdone is None:
+                continue
+            if curl._flush_pending() or curl._wfail:
+                if curl._wdone is not None:
+                    self._finish(curl, curl._wdone)
+                    advanced = True
+                elif curl._pause_mask & libcurl.CURLPAUSE_RECV:
+                    curl._pause_mask &= ~libcurl.CURLPAUSE_RECV
+                    libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
+                    advanced = True
+        return advanced
+
+    def resume(self, curl: Curl, bitmask=None, transfer_id=None):
+        """Thread-safe: queue curl to resume a paused direction, from any thread.
+
+        bitmask is the CURLPAUSE_SEND and/or CURLPAUSE_RECV bits to clear;
+        None clears both. curl_easy_pause() itself is only ever called by the
+        thread currently driving the multi handle inside _perform(), while it
+        holds self._lock, so a resume request here only records the request
+        and wakes that thread instead of calling it directly.
+
+        transfer_id is curl.transfer_id as captured by the caller for the
+        transfer it means to resume. Returns True if the request was queued,
+        False if it was discarded because transfer_id is no longer curl's
+        current transfer or curl is not running in this multi handle (nothing
+        of that transfer can be paused). Without transfer_id the request is
+        only unambiguous while curl runs its first transfer: once curl has
+        been reused (remove()/stop()/reset()), a running handle raises
+        ValueError rather than guess which transfer a late call was meant for.
+        """
+        if bitmask is None:
+            bitmask = libcurl.CURLPAUSE_ALL
+        with self._resume_lock:
+            # Checked and queued under the same lock that ends or deactivates
+            # a transfer (_drop_pending_resume()), so a request is either
+            # queued for the running transfer and dropped with it, or refused
+            if transfer_id is not None and transfer_id != curl._transfer_id:
+                return False
+            if not curl._active:
+                return False
+            if transfer_id is None and curl._transfer_id != 0:
+                raise ValueError(curl.easyhash + ": resume() of a reused Curl needs its transfer_id")
+            bits = self._pending_resume.get(curl.easyhash, (curl._transfer_id, 0))[1]
+            self._pending_resume[curl.easyhash] = (curl._transfer_id, bits | bitmask)
+        self._wake()
+        return True
+
+    def _drop_pending_resume(self, curl, end=False):
+        # A persistent easyhash must not carry a previous transfer's resume;
+        # end=True also ends curl's transfer so its transfer_id goes stale
+        with self._resume_lock:
+            self._pending_resume.pop(curl.easyhash, None)
+            curl._active = False
+            if end:
+                curl._transfer_id += 1
+
+    def _wake(self):
+        # Interrupt a select() blocked waiting for socket activity
+        with contextlib.suppress(BlockingIOError, OSError):
+            self._wake_w.send(b"\x00")
+
+    def _drain_wake(self):
+        with contextlib.suppress(BlockingIOError, OSError):
+            while self._wake_r.recv(4096):
+                pass
+
+    def _apply_pending_resumes(self):
+        # Call curl_easy_pause() for every queued resume; must hold self._lock
+        if len(self._pending_resume) == 0:
+            return False
+        with self._resume_lock:
+            pending = self._pending_resume
+            self._pending_resume = {}
+        applied = False
+        for easyhash, (transfer_id, clear_bits) in pending.items():
+            curl = self.handles.get(easyhash)
+            if curl is None or not curl._active or curl._transfer_id != transfer_id:
+                # Ended since it was queued (reset() does not hold self._lock)
+                continue
+            applied = True
+            if clear_bits & libcurl.CURLPAUSE_RECV and curl._wpending and not curl._flush_pending():
+                clear_bits &= ~libcurl.CURLPAUSE_RECV
+            curl._pause_mask &= ~clear_bits
+            libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
+        return applied
 
     # Adding to multi
 
@@ -1459,8 +1893,14 @@ class MCurl:
         # Add a handle
         dprint(curl.easyhash + ": Add handle")
         if curl.easyhash not in self.handles:
+            self._drop_pending_resume(curl)
+            curl._prepare_expect()
             self.handles[curl.easyhash] = curl
             libcurl.curl_multi_add_handle(self._multi, curl.easy)
+            # Only now accept resume() requests: one that raced in anywhere
+            # above (even after the drop) was refused as not running
+            with self._resume_lock:
+                curl._active = True
             dprint(curl.easyhash + ": Added handle")
         else:
             dprint(curl.easyhash + ": Active handle")
@@ -1473,13 +1913,16 @@ class MCurl:
 
     # Removing from multi
 
-    def _remove_handle(self, curl: Curl, errstr=""):
-        # Remove a handle and set status
+    def _remove_handle(self, curl: Curl, errstr="", end=False):
+        # Remove a handle and set status; end=True for remove()/stop(), not
+        # for do() retrying the same transfer
+        self._drop_pending_resume(curl, end)
         if curl.easyhash not in self.handles:
             return
 
         if curl.done is False:
             curl.done = True
+        curl._clear_write_state()
 
         if len(errstr) != 0:
             curl.errstr += errstr + "; "
@@ -1494,14 +1937,14 @@ class MCurl:
     def remove(self, curl: Curl):
         "Remove a completed Curl handle from the multi instance"
         with self._lock:
-            self._remove_handle(curl)
+            self._remove_handle(curl, end=True)
         if curl._probe_proxy is not None:
             self._release_probe(curl)
 
     def stop(self, curl: Curl):
         "Abort a running Curl handle and remove it from the multi instance"
         with self._lock:
-            self._remove_handle(curl, errstr="Stopped")
+            self._remove_handle(curl, errstr="Stopped", end=True)
 
     # Executing multi
 
@@ -1516,26 +1959,49 @@ class MCurl:
             rsnap_set = set(self.rlist)
             wsnap_set = set(self.wlist)
             timer = self.timer
+            pending_write = any(curl._wpending or curl._wdone is not None for curl in self.handles.values())
 
         rsnap = list(rsnap_set)
         wsnap = list(wsnap_set)
         # select()/sleep() outside the lock so other threads can add/remove
         rready, wready, xready = [], [], []
+        select_failed = False
         if len(rsnap) != 0 or len(wsnap) != 0:
             # Cap only waits on sockets, which activity can interrupt; with no
-            # sockets and no timer, sleeping would stall every caller of do()
-            wait = MULTI_SELECT_TIMEOUT if timer is None else timer
+            # sockets and no timer, sleeping would stall every caller of do().
+            # _wake_r is always included so resume() from another thread cuts
+            # this wait short instead of waiting out the timer/select cap.
+            wait = MULTI_SELECT_TIMEOUT if timer is None else max(0.0, timer - time.monotonic())
+            if pending_write:
+                # A receive pause can make libcurl withdraw every socket event,
+                # so retry the sink independently of its potentially long timer.
+                wait = min(wait, PENDING_WRITE_SELECT_TIMEOUT)
+            # A socket can close between the snapshot and select(). Continue
+            # with the empty poll so pending sink writes and completions can
+            # progress, and drop whichever descriptors are really dead below.
             try:
-                rready, wready, xready = select.select(rsnap, wsnap, list(rsnap_set | wsnap_set), wait)
+                rready, wready, xready = select.select([*rsnap, self._wake_r], wsnap, list(rsnap_set | wsnap_set), wait)
             except OSError:
-                # Socket closed between snapshot and select()
-                return
+                select_failed = True
+            except ValueError as exc:
+                # select() cannot service a descriptor outside FD_SETSIZE.
+                # Failing explicitly is safer than leaving a live transfer
+                # registered forever with no possible readiness notification.
+                raise RuntimeError("select() cannot monitor a registered libcurl socket") from exc
         else:
             if timer is not None:
-                time.sleep(timer)
+                wait = max(0.0, timer - time.monotonic())
+                time.sleep(min(wait, PENDING_WRITE_SELECT_TIMEOUT) if pending_write else wait)
 
         # Process ready sockets under lock
         with self._lock:
+            if self._wake_r in rready:
+                rready.remove(self._wake_r)
+                self._drain_wake()
+            if select_failed:
+                self._drop_dead_sockets(rsnap_set | wsnap_set)
+            resumed = self._apply_pending_resumes()
+            flushed = self._flush_pending_writes()
             if len(rready) == 0 and len(wready) == 0 and len(xready) == 0:
                 # dprint("No activity")
                 self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
@@ -1549,108 +2015,217 @@ class MCurl:
                 for sock_fd in xready:
                     # dprint("Error sock_fd %d" % sock_fd)
                     self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
+                if resumed or flushed:
+                    # A queued or flush-driven receive unpause can leave
+                    # already-received data in libcurl without a ready socket
+                    # (notably on Windows), so make its state machine run now.
+                    self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
+
+    def _drop_dead_sockets(self, socks):
+        # select() failed on a snapshot, which does not say which descriptor is
+        # at fault. Probe each one and forget the dead ones (Windows keeps
+        # failing with WSAENOTSOCK on every later select() otherwise, so
+        # libcurl never gets socket events), then tell libcurl they errored so
+        # it fails or re-registers whatever still used them; hold self._lock
+        for sock_fd in socks & (self.rlist | self.wlist):
+            try:
+                select.select([sock_fd], [], [], 0)
+            except OSError:
+                self.rlist.discard(sock_fd)
+                self.wlist.discard(sock_fd)
+                dprint(f"Dropped dead socket {sock_fd}")
+                self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
 
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
-        if not curl.is_easy:
-            self.add(curl)
-            while True:
-                if curl.done:
-                    break
-                self._perform(curl)
-                time.sleep(0.01)
-            curl._save_auth()
-        else:
-            dprint(curl.easyhash + ": Using easy interface")
-            curl.perform()
+        while True:
+            if curl.proxy is not None and curl.auth is not None:
+                # CURLINFO_NUM_CONNECTS says only that a second successful
+                # connection existed. Keep libcurl's precise NTLM diagnostic
+                # too, so a normal close-and-restart handshake still counts.
+                curl._ntlm_reconnect_rejected = False
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_VERBOSE, py2cbool(True))
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
+            if not curl.is_easy:
+                self.add(curl)
+                while True:
+                    if curl.done:
+                        break
+                    self._perform(curl)
+                    time.sleep(0.01)
+                curl._save_auth()
+            else:
+                dprint(curl.easyhash + ": Using easy interface")
+                curl.perform()
 
-        # Map some libcurl error codes to HTTP errors
-        if curl.cerr == libcurl.CURLE_URL_MALFORMAT:
-            # Bad request
-            curl.resp = 400
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [libcurl.CURLE_UNSUPPORTED_PROTOCOL, libcurl.CURLE_NOT_BUILT_IN]:
-            # Not implemented
-            curl.resp = 501
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [
-            libcurl.CURLE_COULDNT_RESOLVE_PROXY,
-            libcurl.CURLE_COULDNT_RESOLVE_HOST,
-            libcurl.CURLE_COULDNT_CONNECT,
-        ]:
-            # Bad gateway
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_OPERATION_TIMEDOUT:
-            # Gateway timeout
-            curl.resp = 504
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
-            # POST/PUT rewind not supported (#199) - retry
-            curl.resp = 503
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [
-            libcurl.CURLE_SSL_CONNECT_ERROR,
-            libcurl.CURLE_PEER_FAILED_VERIFICATION,
-            libcurl.CURLE_SSL_CERTPROBLEM,
-            libcurl.CURLE_SSL_CACERT_BADFILE,
-        ]:
-            # SSL/TLS error
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr in [libcurl.CURLE_SEND_ERROR, libcurl.CURLE_RECV_ERROR, libcurl.CURLE_GOT_NOTHING]:
-            # Network error
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
-            # Auth function error (SSPI/GSS-API failure)
-            curl.resp = 407
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr == libcurl.CURLE_HTTP2:
-            # HTTP/2 framing error
-            curl.resp = 502
-            curl.errstr += Curl.strerror(curl.cerr)
-        elif curl.cerr != libcurl.CURLE_OK:
-            # Unmapped libcurl error
-            curl.resp = 503
-            curl.errstr += f"Curl error {curl.cerr}"
+            # Map some libcurl error codes to HTTP errors
+            if curl.cerr == libcurl.CURLE_URL_MALFORMAT:
+                # Bad request
+                curl.resp = 400
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [libcurl.CURLE_UNSUPPORTED_PROTOCOL, libcurl.CURLE_NOT_BUILT_IN]:
+                # Not implemented
+                curl.resp = 501
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [
+                libcurl.CURLE_COULDNT_RESOLVE_PROXY,
+                libcurl.CURLE_COULDNT_RESOLVE_HOST,
+                libcurl.CURLE_COULDNT_CONNECT,
+            ]:
+                # Bad gateway
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_OPERATION_TIMEDOUT:
+                # Gateway timeout
+                curl.resp = 504
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_SEND_FAIL_REWIND:
+                # The body went out on a proxy auth leg and the source cannot
+                # rewind: inconclusive, never an auth failure (see docs/api.md)
+                curl.resp = 503
+                curl.errstr += REWIND_ERROR
+            elif curl.cerr in [
+                libcurl.CURLE_SSL_CONNECT_ERROR,
+                libcurl.CURLE_PEER_FAILED_VERIFICATION,
+                libcurl.CURLE_SSL_CERTPROBLEM,
+                libcurl.CURLE_SSL_CACERT_BADFILE,
+            ]:
+                # SSL/TLS error
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr in [libcurl.CURLE_SEND_ERROR, libcurl.CURLE_RECV_ERROR, libcurl.CURLE_GOT_NOTHING]:
+                # Network error
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
+                # Auth function error (SSPI/GSS-API failure)
+                curl.resp = 407
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_HTTP2:
+                # HTTP/2 framing error
+                curl.resp = 502
+                curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr != libcurl.CURLE_OK:
+                # Unmapped libcurl error
+                curl.resp = 503
+                curl.errstr += f"Curl error {curl.cerr}"
 
-        # A transfer without a real response is inconclusive. In particular,
-        # stop() leaves CURLE_OK and a zero response code, so it must not clear
-        # a blocked proxy. A CONNECT 407 is the exception: libcurl reports it
-        # as CURLE_COULDNT_CONNECT, but the proxy's auth response is reliable.
-        auth_failed = None
-        if curl.proxy is not None:
-            aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
-            ret, codep = curl.get_response()
-            if curl.cerr != libcurl.CURLE_OK and not aborted:
-                ret, codep = curl.get_connect_response()
-            if not aborted and ret == libcurl.CURLE_OK and codep == 407:
-                # Proxy authentication required
-                if curl.auth is not None:
-                    # Proxy auth did not work for whatever reason
-                    out = "Proxy authentication failed: "
-                    if curl.user is not None:
-                        out += "check user/password or try different auth method"
+            # A transfer without a real response is inconclusive. In particular,
+            # stop() leaves CURLE_OK and a zero response code, so it must not clear
+            # a blocked proxy. A CONNECT 407 is the exception: libcurl reports it
+            # as CURLE_COULDNT_CONNECT, but the proxy's auth response is reliable.
+            # Any other error, or a failed (re)connect, interrupted the handshake
+            # and leaves the 407 of an intermediate leg in HTTP_CONNECTCODE (px#268).
+            auth_failed = None
+            retry_without_negotiate = False
+            retry_after_reconnect = False
+            if curl.proxy is not None:
+                aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
+                ret, codep = curl.get_response()
+                if curl.cerr != libcurl.CURLE_OK:
+                    ret, codep = curl.get_connect_response()
+                    if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or TUNNEL_407 not in curl.get_errorbuffer():
+                        # CURLINFO_OS_ERRNO and HTTP_CONNECTCODE persist across the
+                        # legs of a transfer so libcurl's last error message decides
+                        aborted = True
+                if not aborted and ret == libcurl.CURLE_OK and codep == 407:
+                    # Proxy authentication required
+                    if curl.suppress:
+                        # 407 header block never completed - connection cut mid-headers
+                        dprint(curl.easyhash + ": Truncated 407 response")
+                        curl.resp = 502
+                        curl.errstr += "Truncated proxy response; "
+                    elif curl.auth is not None:
+                        ret_pa, proxyauth_used = curl.get_proxyauth_used()
+                        ret_nc, num_connects = curl.get_num_connects()
+                        if (
+                            not curl._negotiate_retried
+                            and curl.auth & libcurl.CURLAUTH_NTLM
+                            and ret_pa == libcurl.CURLE_OK
+                            and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE
+                        ):
+                            # ANY picked Negotiate and GSS-API failed locally (no
+                            # ticket) without ever trying NTLM, which the proxy also
+                            # offered (libcurl http.c authproblem). SSPI on Windows
+                            # falls back to NTLM by itself, so proxyauth_used is
+                            # never left at NEGOTIATE there and this never matches.
+                            retry_without_negotiate = True
+                            if curl._content_length and curl._seek(0, 0) != libcurl.CURL_SEEKFUNC_OK:
+                                # Body cannot be resent: inconclusive, not an auth failure
+                                retry_without_negotiate = False
+                                curl.resp = 503
+                                curl.errstr += "Request body cannot be resent for NTLM retry; "
+                        elif (
+                            not curl._ntlm_reconnect_retried
+                            and ret_nc == libcurl.CURLE_OK
+                            and num_connects > 1
+                            and curl._ntlm_reconnect_rejected
+                        ):
+                            # NUM_CONNECTS counts successful connections only,
+                            # unlike failed happy-eyeballs addresses. The text
+                            # confirms libcurl resumed a connection-bound NTLM
+                            # handshake rather than starting one after a normal
+                            # Connection: close response.
+                            retry_after_reconnect = True
+                            if curl._content_length and curl._seek(0, 0) != libcurl.CURL_SEEKFUNC_OK:
+                                retry_after_reconnect = False
+                                curl.resp = 503
+                                curl.errstr += "Request body cannot be resent after NTLM reconnect; "
+                        else:
+                            # Proxy auth did not work for whatever reason
+                            out = "Proxy authentication failed: "
+                            if curl.user is not None:
+                                out += "check user/password or try different auth method"
+                            else:
+                                out += "single sign-on failed, user/password might be required"
+
+                            curl.resp = 401
+                            curl.errstr += out + "; "
+
+                            # Increment failure count for this proxy; block after threshold attempts
+                            auth_failed = True
                     else:
-                        out += "single sign-on failed, user/password might be required"
+                        # Setup client to authenticate directly with upstream proxy
+                        dprint(curl.easyhash + ": Client to authenticate with upstream proxy")
+                        if not curl.is_connect:
+                            # curl.errstr not set else connection will get closed during auth
+                            curl.resp = codep
+                elif curl.cerr == libcurl.CURLE_OK and not aborted and ret == libcurl.CURLE_OK and codep != 0:
+                    # Successful (or non‑auth) response – reset failure counter for this proxy
+                    auth_failed = False
 
-                    curl.resp = 401
-                    curl.errstr += out + "; "
-
-                    # Increment failure count for this proxy; block after threshold attempts
-                    auth_failed = True
+            if retry_without_negotiate or retry_after_reconnect:
+                if retry_without_negotiate:
+                    # Retry once with Negotiate removed from the mask so libcurl's
+                    # next attempt picks NTLM instead; this attempt does not count.
+                    dprint(curl.easyhash + ": Negotiate failed locally, retrying with NTLM")
+                    curl._negotiate_retried = True
+                    curl.auth &= ~libcurl.CURLAUTH_NEGOTIATE
+                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(curl.auth))
                 else:
-                    # Setup client to authenticate directly with upstream proxy
-                    dprint(curl.easyhash + ": Client to authenticate with upstream proxy")
-                    if not curl.is_connect:
-                        # curl.errstr not set else connection will get closed during auth
-                        curl.resp = codep
-            elif curl.cerr == libcurl.CURLE_OK and not aborted and ret == libcurl.CURLE_OK and codep != 0:
-                # Successful (or non‑auth) response – reset failure counter for this proxy
-                auth_failed = False
-        if curl.proxy is not None:
-            self._record_proxy_auth(curl, auth_failed)
+                    dprint(curl.easyhash + ": NTLM resumed after reconnect, retrying on a fresh connection")
+                    curl._ntlm_reconnect_retried = True
+                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FRESH_CONNECT, py2cbool(True))
+                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FORBID_REUSE, py2cbool(True))
+                if not curl.is_easy:
+                    with self._lock:
+                        self._remove_handle(curl)
+                # _update_transfers() only overwrites cerr on a new error, so a
+                # stale failure here would otherwise survive a successful retry
+                curl.cerr = libcurl.CURLE_OK
+                curl.resp = 503
+                curl.errstr = ""
+                curl.suppress = False
+                curl.sentheaders = False
+                curl.done = False
+                continue
+
+            if curl._ntlm_reconnect_retried:
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FRESH_CONNECT, py2cbool(False))
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FORBID_REUSE, py2cbool(False))
+            if curl.proxy is not None:
+                self._record_proxy_auth(curl, auth_failed)
+            break
 
         if curl.is_connect and curl.sock_fd is None:
             # Get the active socket for select()
@@ -1802,8 +2377,10 @@ class MCurl:
         with self._lock:
             pending = list(self.handles.values())
             for curl in pending:
-                self._remove_handle(curl, errstr="Stopped")
+                self._remove_handle(curl, errstr="Stopped", end=True)
             libcurl.curl_multi_cleanup(self._multi)
+        self._wake_r.close()
+        self._wake_w.close()
 
         global MCURL
         MCURL = None

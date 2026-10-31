@@ -2,7 +2,22 @@
 
 ---
 
-## v8.23.0.2 — TBD
+## v8.23.0.3 — 2026-10-31
+
+### Bug fixes
+- Proxy authentication now counts only genuine final CONNECT 407 responses and handles interrupted handshakes and incomplete 407 responses correctly (genotrance/px#268).
+- Failed proxy authentication methods are no longer cached, so a later requested method can be tried normally (genotrance/px#268).
+- On Linux and macOS, `auth=ANY` now falls back from Negotiate to NTLM when local GSS-API authentication fails (genotrance/px#268).
+- POST and PUT bodies are resent correctly across proxy-auth retries, while non-rewindable sources remain inconclusive instead of being reported as bad credentials (genotrance/px#268).
+- `bridge()` uploads now pass through proxy authentication without curl error 65, preserve chunked and PATCH bodies, and avoid stale `Expect` handling on reused proxies (genotrance/px#268).
+
+### New features
+- Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
+- `bridge()` sources and sinks can now be non-blocking; `Curl.resume_upload()` and `Curl.resume_download()` resume paused transfers, including response sinks that accept only partial writes.
+
+---
+
+## v8.23.0.2 — 2026-10-23
 
 - macOS arm64 wheels now require macOS 15 or later (changed in 8.23.0.1).
   macOS 14 users receive the source distribution instead.
@@ -21,7 +36,7 @@
 
 ---
 
-## v8.23.0.1 — TBD
+## v8.23.0.1 — 2026-10-23
 
 - This release was yanked from PyPI: its HTTPS proxy authentication handling
   regressed under concurrent load (see v8.23.0.2). Use 8.23.0.2 or later.

@@ -8,8 +8,82 @@ on:
       - working
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    # Weekly full lane (runs from the default branch, devel)
+    - cron: "0 3 * * 6"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full matrix including slow tests"
+        type: boolean
+        default: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      lane: ${{ steps.plan.outputs.lane }}
+      pytest_args: ${{ steps.plan.outputs.pytest_args }}
+      tests: ${{ steps.plan.outputs.tests }}
+      windows: ${{ steps.plan.outputs.windows }}
+      linux_wheels: ${{ steps.plan.outputs.linux_wheels }}
+      musl_wheels: ${{ steps.plan.outputs.musl_wheels }}
+    steps:
+      - name: Select fast or full lane
+        id: plan
+        env:
+          FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          full = os.environ["FULL"] == "true"
+          if full:
+              tests = (
+                  [("ubuntu-latest", v) for v in ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "pypy3.11")]
+                  + [("ubuntu-24.04-arm", v) for v in ("3.9", "3.13", "3.14", "3.15", "pypy3.11")]
+                  # PyPy on macOS is intentionally excluded (cffi conflict, see docs/ci.md)
+                  + [("macos-15", v) for v in ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15")]
+              )
+              windows = ["cp39", "cp312", "cp313", "cp314", "cp315", "cp315t"]
+              linux_wheels = [("i686", "cp39"), ("i686", "cp314"), ("i686", "cp315"), ("x86_64", "cp315t")]
+              musl_wheels = [("ubuntu-latest", "x86_64", "cp315"), ("ubuntu-24.04-arm", "aarch64", "cp315")]
+          else:
+              tests = [
+                  ("ubuntu-latest", "3.9"),
+                  ("ubuntu-latest", "3.15"),
+                  ("ubuntu-latest", "pypy3.11"),
+                  ("ubuntu-24.04-arm", "3.15"),
+                  ("macos-15", "3.15"),
+              ]
+              windows = ["cp315"]
+              linux_wheels = [("i686", "cp315")]
+              musl_wheels = []
+
+          def pyver(tag):
+              return tag[2] + "." + tag[3:]
+
+          out = {
+              "lane": "full" if full else "fast",
+              "pytest_args": "" if full else '-m "not slow"',
+              "tests": json.dumps({"include": [{"os": o, "python-version": v} for o, v in tests]}),
+              "windows": json.dumps({"include": [
+                  {"python-version": pyver(t), "cibw_build": f"{t}-win_amd64"} for t in windows
+              ]}),
+              "linux_wheels": json.dumps({"include": [
+                  {"arch": a, "python-version": pyver(t), "cibw_build": f"{t}-manylinux_{a}"} for a, t in linux_wheels
+              ]}),
+              "musl_wheels": json.dumps({"include": [
+                  {"os": o, "arch": a, "python-version": pyver(t), "cibw_build": f"{t}-musllinux_{a}"}
+                  for o, a, t in musl_wheels
+              ]}),
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for k, v in out.items():
+                  f.write(f"{k}={v}\n")
+                  print(f"{k}={v}")
+          PY
+
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -29,53 +103,11 @@ jobs:
 
   tests:
     runs-on: ${{ matrix.os }}
+    needs: plan
+    name: tests ${{ needs.plan.outputs.lane }} (${{ matrix.os }}, ${{ matrix.python-version }})
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Linux x86_64 - all Python versions
-          - os: ubuntu-latest
-            python-version: "3.9"
-          - os: ubuntu-latest
-            python-version: "3.10"
-          - os: ubuntu-latest
-            python-version: "3.11"
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.13"
-          - os: ubuntu-latest
-            python-version: "3.14"
-          - os: ubuntu-latest
-            python-version: "3.15"
-          - os: ubuntu-latest
-            python-version: "pypy3.11"
-          # Linux aarch64 - native ARM runners
-          - os: ubuntu-24.04-arm
-            python-version: "3.9"
-          - os: ubuntu-24.04-arm
-            python-version: "3.13"
-          - os: ubuntu-24.04-arm
-            python-version: "3.14"
-          - os: ubuntu-24.04-arm
-            python-version: "3.15"
-          - os: ubuntu-24.04-arm
-            python-version: "pypy3.11"
-          # macOS arm64
-          - os: macos-15
-            python-version: "3.9"
-          - os: macos-15
-            python-version: "3.10"
-          - os: macos-15
-            python-version: "3.11"
-          - os: macos-15
-            python-version: "3.12"
-          - os: macos-15
-            python-version: "3.13"
-          - os: macos-15
-            python-version: "3.14"
-          - os: macos-15
-            python-version: "3.15"
+      matrix: ${{ fromJSON(needs.plan.outputs.tests) }}
     defaults:
       run:
         shell: bash
@@ -83,14 +115,9 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
 
-      - name: Update Homebrew libcurl (macOS)
+      - name: Ensure Homebrew libcurl matches pyproject (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew upgrade curl || true
-          EXPECTED=$(python3 -c "import pathlib, re; m = re.search(r'^version = \"([0-9]+\.[0-9]+\.[0-9]+)\.', pathlib.Path('pyproject.toml').read_text(), re.M); print(m.group(1))")
-          INSTALLED=$("$(brew --prefix curl)/bin/curl" --version | sed -n '1s/curl \([^ ]*\).*/\1/p')
-          test "$INSTALLED" = "$EXPECTED"
+        run: bash tools/brew_curl.sh
 
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
@@ -112,24 +139,14 @@ jobs:
           echo "DYLD_LIBRARY_PATH=${DIRS}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Run tests
-        run: uv run --locked python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
+        run: uv run --locked python -m pytest tests ${{ needs.plan.outputs.pytest_args }} --cov --cov-config=pyproject.toml --cov-report=xml
 
   tests-windows:
     runs-on: windows-latest
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - python-version: "3.9"
-            cibw_build: "cp39-win_amd64"
-          - python-version: "3.12"
-            cibw_build: "cp312-win_amd64"
-          - python-version: "3.13"
-            cibw_build: "cp313-win_amd64"
-          - python-version: "3.14"
-            cibw_build: "cp314-win_amd64"
-          - python-version: "3.15"
-            cibw_build: "cp315-win_amd64"
+      matrix: ${{ fromJSON(needs.plan.outputs.windows) }}
     name: test windows ${{ matrix.python-version }}
     steps:
       - name: Check out
@@ -147,21 +164,17 @@ jobs:
             uv pip install delvewheel "jbb>=0.1.6" &&
             python -c "import os, subprocess, jbb; version = next(line.split('=', 1)[1].strip().strip(chr(34)) for line in open('pyproject.toml') if line.startswith('version')); subprocess.call(['delvewheel', 'repair', '--add-path', os.path.pathsep.join(jbb.jbb(f'LibCURL-v{version.rsplit(chr(46), 1)[0]}', outdir=os.environ['TMP']+'\\mcurl\\'+jbb.get_key(), project='genotrance', quiet=True)), '-w', r'{dest_dir}', r'{wheel}'])"
           CIBW_TEST_REQUIRES: "pytest pytest-httpbin"
-          CIBW_TEST_COMMAND: "pytest {project}/tests -q"
+          CIBW_TEST_COMMAND: pytest {project}/tests -q -rs --import-mode=importlib ${{ needs.plan.outputs.pytest_args }}
+          CIBW_TEST_SKIP: ""
 
   tests-i686:
     runs-on: ubuntu-latest
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - python-version: "3.9"
-            cibw_build: "cp39-manylinux_i686"
-          - python-version: "3.14"
-            cibw_build: "cp314-manylinux_i686"
-          - python-version: "3.15"
-            cibw_build: "cp315-manylinux_i686"
-    name: test linux i686 ${{ matrix.python-version }}
+      matrix: ${{ fromJSON(needs.plan.outputs.linux_wheels) }}
+    # Always the full suite: the slow burst tests are what exhausted the 32-bit address space
+    name: test linux ${{ matrix.arch }} ${{ matrix.python-version }}
     steps:
       - name: Check out
         uses: actions/checkout@v7
@@ -169,8 +182,35 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Build and test wheels (Linux i686)
+      - name: Build and test wheels (Linux ${{ matrix.arch }})
         uses: pypa/cibuildwheel@v4.3.4
         env:
-          CIBW_ARCHS: i686
+          CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.cibw_build }}
+          CIBW_TEST_COMMAND: "pytest {project}/tests -q -rs --import-mode=importlib"
+          CIBW_TEST_SKIP: ""
+
+  tests-musl:
+    runs-on: ${{ matrix.os }}
+    needs: plan
+    # Full lane only: the fast lane has no musllinux job and an empty matrix would fail
+    if: needs.plan.outputs.lane == 'full'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.musl_wheels) }}
+    # The release build only smoke-tests musllinux wheels, so this is the only full-suite run on musl
+    name: test musllinux ${{ matrix.arch }} ${{ matrix.python-version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build and test wheels (musllinux ${{ matrix.arch }})
+        uses: pypa/cibuildwheel@v4.3.4
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_BUILD: ${{ matrix.cibw_build }}
+          CIBW_TEST_COMMAND: "pytest {project}/tests -q -rs --import-mode=importlib"
+          CIBW_TEST_SKIP: ""

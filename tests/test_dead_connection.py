@@ -39,6 +39,7 @@ def _url(address):
     return f"http://{address[0]}:{address[1]}/"
 
 
+@pytest.mark.slow
 def test_stalled_http_body_times_out(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -60,6 +61,7 @@ def test_stalled_http_body_times_out(local_server):
     multi.close()
 
 
+@pytest.mark.slow
 def test_slow_steady_download_survives_low_speed_guard(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -78,6 +80,7 @@ def test_slow_steady_download_survives_low_speed_guard(local_server):
     multi.close()
 
 
+@pytest.mark.slow
 def test_connect_tunnel_has_no_low_speed_deadline(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -97,6 +100,7 @@ def test_connect_tunnel_has_no_low_speed_deadline(local_server):
     multi.close()
 
 
+@pytest.mark.slow
 def test_silent_proxy_connect_obeys_connect_timeout(local_server):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -166,7 +170,7 @@ def test_keepalive_socket_options_and_disable(local_server):
     multi.close()
 
 
-def test_multi_no_timer_wait_is_bounded(monkeypatch):
+def test_multi_no_timer_wait_is_bounded(patch_mcurl):
     multi = mcurl.MCurl()
     multi.timer = None
     multi.rlist = {10}
@@ -176,36 +180,37 @@ def test_multi_no_timer_wait_is_bounded(monkeypatch):
         seen.append(timeout)
         return [], [], []
 
-    monkeypatch.setattr(mcurl.select, "select", fake_select)
+    patch_mcurl("select", "select", fake_select)
     multi._perform()
     assert seen == [mcurl.MULTI_SELECT_TIMEOUT]
     multi.close()
 
 
-def test_multi_no_timer_no_sockets_does_not_sleep(monkeypatch):
+def test_multi_no_timer_no_sockets_does_not_sleep(patch_mcurl):
     # Nothing can interrupt a sleep, so capping it would stall do() callers
     multi = mcurl.MCurl()
     multi.timer = None
     multi.rlist = set()
     multi.wlist = set()
     slept = []
-    monkeypatch.setattr(mcurl.time, "sleep", slept.append)
+    patch_mcurl("time", "sleep", slept.append)
     multi._perform()
     assert slept == []
-    multi.timer = 0.25
+    multi.timer = time.monotonic() + 0.25
     multi._perform()
-    assert slept == [0.25]
+    assert len(slept) == 1
+    assert 0 <= slept[0] <= 0.25
     multi.close()
 
 
-def test_multi_perform_skips_wait_for_finished_handle(monkeypatch):
+def test_multi_perform_skips_wait_for_finished_handle(patch_mcurl):
     # A handle finished by another thread must not wait on unrelated sockets
     multi = mcurl.MCurl()
     multi.timer = None
     multi.rlist = {10}
     curl = mcurl.Curl("http://127.0.0.1/")
     curl.done = True
-    monkeypatch.setattr(mcurl.select, "select", lambda *args: pytest.fail("select called"))
+    patch_mcurl("select", "select", lambda *args: pytest.fail("select called"))
     multi._perform(curl)
     multi.close()
 
@@ -234,7 +239,8 @@ class _MultiRoundAuthProxy(socketserver.BaseRequestHandler):
             return
 
 
-def test_concurrent_multi_round_connect_auth_is_not_stalled(local_server, monkeypatch):
+@pytest.mark.slow
+def test_concurrent_multi_round_connect_auth_is_not_stalled(local_server, patch_mcurl):
     # pymcurl 8.23.0.1 slept a full MULTI_SELECT_TIMEOUT whenever a do() loop
     # saw no sockets and no libcurl timer; concurrent tunnels then stalled
     # long enough for TLS servers with short handshake timeouts to give up
@@ -247,7 +253,7 @@ def test_concurrent_multi_round_connect_auth_is_not_stalled(local_server, monkey
             long_sleeps.append(seconds)
         real_sleep(seconds)
 
-    monkeypatch.setattr(mcurl.time, "sleep", sleep)
+    patch_mcurl("time", "sleep", sleep)
     multi = mcurl.MCurl()
     errors = []
 
