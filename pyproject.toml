@@ -114,6 +114,7 @@ ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+faulthandler_timeout = 120
 markers = [
     "slow: burst, timeout and dead/slow connection tests that wait on real time; excluded by the fast selection, always run by an unfiltered pytest",
     "smoke: short wheel smoke selection run by cibuildwheel on the installed wheel",

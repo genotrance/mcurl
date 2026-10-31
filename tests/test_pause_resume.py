@@ -263,6 +263,73 @@ def test_select_error_flushes_pending_completion(multi, monkeypatch):
     assert curl.done
 
 
+def test_flush_unpause_runs_timeout_without_writable_socket(multi, monkeypatch):
+    """A Windows-style pause can remove writable interest while a suffix waits.
+
+    The selected read event flushes the suffix, but does not itself prove that
+    libcurl has a writable socket to drive after the receive unpause. The
+    timeout action must run in the same turn so cached response data continues.
+    """
+
+    class Sink:
+        def write(self, buf):
+            return len(buf)
+
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    curl.client_wfile = Sink()
+    curl._wpending = b"suffix"
+    curl._pause_mask = mcurl.libcurl.CURLPAUSE_RECV
+    multi.handles[curl.easyhash] = curl
+    multi.rlist = {123}
+    actions = []
+
+    def windows_paused_select(readers, writers, errors, timeout):
+        # Windows does not retain Linux's always-writable interest while RECV
+        # is paused. A stale read notification is all this turn can report.
+        assert readers[0] == 123
+        assert writers == []
+        assert curl._pause_mask & mcurl.libcurl.CURLPAUSE_RECV
+        return [123], [], []
+
+    monkeypatch.setattr(mcurl.select, "select", windows_paused_select)
+    monkeypatch.setattr(multi, "_socket_action", lambda sock, events: actions.append((sock, events)))
+    multi._perform()
+
+    assert not curl._wpending
+    assert curl._pause_mask == 0
+    assert actions == [
+        (123, mcurl.libcurl.CURL_CSELECT_IN),
+        (mcurl.libcurl.CURL_SOCKET_TIMEOUT, 0),
+    ]
+
+
+def test_timer_callback_stores_deadline(multi, monkeypatch):
+    now = [100.0]
+    waits = []
+    monkeypatch.setattr(mcurl.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(mcurl.select, "select", lambda *args: waits.append(args[-1]) or ([], [], []))
+    multi.rlist = {123}
+
+    mcurl.multi_timer_callback(mcurl.ffi.NULL, 250, mcurl.ffi.NULL)
+    now[0] = 100.2
+    multi._perform()
+
+    assert waits == [pytest.approx(0.05)]
+
+
+def test_select_value_error_keeps_registered_socket(multi, monkeypatch):
+    """Linux fd >= FD_SETSIZE is not evidence that a socket was closed."""
+    multi.rlist = {123}
+    actions = []
+    monkeypatch.setattr(mcurl.select, "select", lambda *args: (_ for _ in ()).throw(ValueError("fd out of range")))
+    monkeypatch.setattr(multi, "_socket_action", lambda sock, events: actions.append((sock, events)))
+
+    multi._perform()
+
+    assert multi.rlist == {123}
+    assert actions == [(mcurl.libcurl.CURL_SOCKET_TIMEOUT, 0)]
+
+
 @pytest.mark.parametrize("ready_calls", [1000000, 3])
 def test_stale_socket_cannot_strand_partial_write_transfer(local_server, multi, monkeypatch, ready_calls):
     "A dead descriptor left in the socket lists must be dropped, not make every later select() fail"

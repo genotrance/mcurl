@@ -1534,13 +1534,14 @@ def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
 
 @ffi.def_extern()
 def multi_timer_callback(multi, timeout_ms, userp):
-    # libcurl timer callback: schedule/cancel a timeout action
+    # libcurl gives a relative timeout; retain its monotonic deadline so time
+    # spent handling another event cannot make a later select() oversleep.
     # dprint("timeout = %d" % timeout_ms)
     del multi, userp
     if timeout_ms == -1:
         MCURL.timer = None
     else:
-        MCURL.timer = timeout_ms / 1000.0
+        MCURL.timer = time.monotonic() + timeout_ms / 1000.0
 
     return libcurl.CURLE_OK
 
@@ -1589,7 +1590,7 @@ class MCurl:
     handles = None
     proxyauth = None
     failed = None  # Proxy servers with auth failures
-    timer = None
+    timer = None  # Monotonic deadline requested by libcurl
     rlist = None
     wlist = None
 
@@ -1797,15 +1798,19 @@ class MCurl:
     def _flush_pending_writes(self):
         # Retry every pending write suffix, resume receiving once flushed and
         # complete handles whose CURLMSG_DONE waited on one; hold self._lock
+        advanced = False
         for curl in list(self.handles.values()):
             if not curl._wpending and curl._wdone is None:
                 continue
             if curl._flush_pending() or curl._wfail:
                 if curl._wdone is not None:
                     self._finish(curl, curl._wdone)
+                    advanced = True
                 elif curl._pause_mask & libcurl.CURLPAUSE_RECV:
                     curl._pause_mask &= ~libcurl.CURLPAUSE_RECV
                     libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
+                    advanced = True
+        return advanced
 
     def resume(self, curl: Curl, bitmask=None, transfer_id=None):
         """Thread-safe: queue curl to resume a paused direction, from any thread.
@@ -1964,17 +1969,22 @@ class MCurl:
             # sockets and no timer, sleeping would stall every caller of do().
             # _wake_r is always included so resume() from another thread cuts
             # this wait short instead of waiting out the timer/select cap.
-            wait = MULTI_SELECT_TIMEOUT if timer is None else timer
+            wait = MULTI_SELECT_TIMEOUT if timer is None else max(0.0, timer - time.monotonic())
             # A socket can close between the snapshot and select(). Continue
             # with the empty poll so pending sink writes and completions can
             # progress, and drop whichever descriptors are really dead below.
             try:
                 rready, wready, xready = select.select([*rsnap, self._wake_r], wsnap, list(rsnap_set | wsnap_set), wait)
-            except (OSError, ValueError):
+            except OSError:
                 select_failed = True
+            except ValueError:
+                # On Unix this can mean fd >= FD_SETSIZE, not a closed socket.
+                # Leave the registered descriptors alone and let libcurl
+                # refresh them through the timeout action below.
+                pass
         else:
             if timer is not None:
-                time.sleep(timer)
+                time.sleep(max(0.0, timer - time.monotonic()))
 
         # Process ready sockets under lock
         with self._lock:
@@ -1984,7 +1994,7 @@ class MCurl:
             if select_failed:
                 self._drop_dead_sockets(rsnap_set | wsnap_set)
             resumed = self._apply_pending_resumes()
-            self._flush_pending_writes()
+            flushed = self._flush_pending_writes()
             if len(rready) == 0 and len(wready) == 0 and len(xready) == 0:
                 # dprint("No activity")
                 self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
@@ -1998,9 +2008,10 @@ class MCurl:
                 for sock_fd in xready:
                     # dprint("Error sock_fd %d" % sock_fd)
                     self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
-                if resumed:
-                    # A resumed handle may have no socket activity of its own
-                    # this round; give it a chance to progress too
+                if resumed or flushed:
+                    # A queued or flush-driven receive unpause can leave
+                    # already-received data in libcurl without a ready socket
+                    # (notably on Windows), so make its state machine run now.
                     self._socket_action(libcurl.CURL_SOCKET_TIMEOUT, 0)
 
     def _drop_dead_sockets(self, socks):
@@ -2012,9 +2023,10 @@ class MCurl:
         for sock_fd in socks & (self.rlist | self.wlist):
             try:
                 select.select([sock_fd], [], [], 0)
-            except (OSError, ValueError):
+            except OSError:
                 self.rlist.discard(sock_fd)
                 self.wlist.discard(sock_fd)
+                dprint(f"Dropped dead socket {sock_fd}")
                 self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
 
     def do(self, curl: Curl):
