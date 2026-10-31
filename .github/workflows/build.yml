@@ -172,6 +172,7 @@ jobs:
         run: |
           uv venv --python 3.13 .venv
           uv sync --locked
+          shopt -s nullglob
           WHEELS=( ../wheelhouse/pymcurl-*-cp39-abi3-*manylinux*x86_64*.whl )
           if [ ${#WHEELS[@]} -ne 1 ]; then
             echo "Expected exactly one manylinux x86_64 cp39-abi3 wheel, found ${#WHEELS[@]}"
