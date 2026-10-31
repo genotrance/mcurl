@@ -318,7 +318,11 @@ queued release re-checks the `main` SHA before it commits anything.
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
    version, so a tag can never point at a commit declaring a different
-   version. It then checks PyPI: if the version is already published the
+   version. It downloads only the wheel and sdist artifacts (the `wheels-*`
+   artifacts and `sdist`), not every artifact in the run: diagnostic artifacts
+   such as `px-scenario-logs` from an earlier failed attempt persist across
+   reruns and would otherwise be merged into `dist/` and fail the version
+   check. It then checks PyPI: if the version is already published the
    upload is skipped (never uploading twice) and only the missing tag is
    created; otherwise it uploads via
    [trusted publisher](https://docs.pypi.org/trusted-publishers/) and tags
