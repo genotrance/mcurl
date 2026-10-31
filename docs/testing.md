@@ -170,12 +170,17 @@ the wheel bundles them.
 own suite does not catch everything a consumer depends on. px's HTTPS
 proxy-auth tests caught a regression in 8.23.0.1 that mcurl's suite did not.
 `build.yml` now makes px's Docker-backed corporate proxy scenario suite a
-release gate: it installs the Linux candidate wheel into px's `devel` checkout
-and runs the suite in every release and dry run. It selects all `scenario`
-tests in px, so the px upload scenarios (POST/PUT/PATCH through the NTLM and
-Negotiate/Kerberos Squid proxies) are covered once px adds them. Ordinary pull
-requests do not need this run, but changes to proxy authentication, auth retry,
-or timeouts should be called out in the PR.
+release gate in every release and dry run. The job puts only the Linux
+candidate wheel in a dedicated directory and passes it as `MCURL_WHEELS` to
+px's `tests/scenarios/env/scenario-env.sh`. It runs `up`, `test` with the
+scenario pytest arguments, and an always-run `down`. The script starts the
+lab, then runs pytest and every Px process in its private-network `client`
+container, where it reinstalls pymcurl from that directory after `uv sync`.
+The gate checks that both the wheel filename and the imported pymcurl match
+the release's resolved version before running all px `scenario` tests,
+including upload scenarios through the NTLM and Negotiate/Kerberos Squid
+proxies. Ordinary pull requests do not need this run, but changes to proxy
+authentication, auth retry, or timeouts should be called out in the PR.
 
 ### Local reproduction
 
@@ -184,13 +189,14 @@ or timeouts should be called out in the PR.
 | Fast push/PR lane | `make test-fast` (run `eval $(make env)` first on Linux so the test-time `LD_LIBRARY_PATH` points at the jbb libcurl) |
 | Full lane | `make test`, or `uv run python -m pytest tests -q` |
 | Wheel smoke (on an installed wheel) | Build with `uv build`, install the wheel into a fresh virtual environment with `pytest` and `pytest-httpbin`, then run `python -m pytest <checkout>/tests -m smoke -q -rs --import-mode=importlib` from a directory outside the checkout |
-| px corporate proxy scenarios (release gate) | In a px `devel` checkout with Docker available: `uv venv --python 3.13 .venv && uv sync --locked && uv pip install --python .venv/bin/python --reinstall /path/to/mcurl/dist/pymcurl-*.whl && PX_REQUIRE_MCURL_FIX=1 PX_SCENARIO_ENV=start uv run --locked --no-sync python -m pytest tests/scenarios -m scenario -v` |
+| px corporate proxy scenarios (release gate) | In a px `devel` checkout with Docker available, put only the candidate wheel in `/tmp/mcurl-candidate-wheel`, then run `tests/scenarios/env/scenario-env.sh up`, `MCURL_WHEELS=/tmp/mcurl-candidate-wheel tests/scenarios/env/scenario-env.sh test tests/scenarios -m scenario -v`, and `tests/scenarios/env/scenario-env.sh down` (run `down` even if `test` fails). |
 
 `make test-smoke` runs the smoke selection against the editable development
 environment. It does not test an installed wheel, which is what cibuildwheel
 checks, so use the wheel command above to reproduce the release test.
-The px command uses a locally built candidate wheel, not an editable mcurl
-checkout, and its fixture tears down the Docker environment when the run ends.
+The px commands use a locally built candidate wheel, not an editable mcurl
+checkout; `scenario-env.sh` runs the tests inside the lab client and `down`
+tears the Docker environment down.
 
 ### Manual run
 
