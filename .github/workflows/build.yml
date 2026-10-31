@@ -164,45 +164,53 @@ jobs:
           name: wheels-ubuntu-latest-x86_64
           path: wheelhouse
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Install px with the candidate wheel
-        working-directory: px
+      - name: Select the candidate wheel
         run: |
-          uv venv --python 3.13 .venv
-          uv sync --locked
           shopt -s nullglob
-          WHEELS=( ../wheelhouse/pymcurl-*-cp39-abi3-*manylinux*x86_64*.whl )
+          WHEELS=( wheelhouse/pymcurl-*-cp39-abi3-*manylinux*x86_64*.whl )
           if [ ${#WHEELS[@]} -ne 1 ]; then
             echo "Expected exactly one manylinux x86_64 cp39-abi3 wheel, found ${#WHEELS[@]}"
             echo "Available wheels:"
-            ls ../wheelhouse/*.whl 2>/dev/null || echo "No wheels found"
+            ls wheelhouse/*.whl 2>/dev/null || echo "No wheels found"
             exit 1
           fi
-          WHEEL="${WHEELS[0]}"
-          uv pip install --python .venv/bin/python --reinstall "$WHEEL"
-          .venv/bin/python -c "import mcurl; print(mcurl.curl_version())"
+          CANDIDATE_VERSION=$(basename "${WHEELS[0]}" | cut -d- -f2)
+          if [ "$CANDIDATE_VERSION" != "8.23.0.3" ]; then
+            echo "Expected pymcurl candidate version 8.23.0.3, found $CANDIDATE_VERSION"
+            exit 1
+          fi
+          mkdir -p "${{ runner.temp }}/mcurl-candidate-wheel"
+          cp "${WHEELS[0]}" "${{ runner.temp }}/mcurl-candidate-wheel/"
 
+      - name: Bring up the corporate proxy scenario environment
+        working-directory: px
+        run: tests/scenarios/env/scenario-env.sh up
+
+      # px's scenario client runs pytest and every Px it starts inside the
+      # lab's private Docker network, which is why this can no longer run on
+      # the runner itself (it cannot resolve lab hostnames such as
+      # squid-basic). scenario-env.sh test bind-mounts the px checkout into
+      # the client container, copies the candidate wheel directory in at the
+      # same path, and reinstalls pymcurl from it after uv sync. It then runs
+      # px's own px#268 fix check, which fails the job unless the pymcurl
+      # imported in the client is >= 8.23.0.3. The selection above requires
+      # the sole source wheel to be exactly 8.23.0.3, confirming that
+      # candidate wheel is what scenarios actually exercised.
       - name: Run px corporate proxy scenarios
         working-directory: px
         env:
-          PX_REQUIRE_MCURL_FIX: "1"
-          PX_SCENARIO_ENV: start
-        shell: bash
+          MCURL_WHEELS: ${{ runner.temp }}/mcurl-candidate-wheel
         run: |
-          set -o pipefail
-          mkdir -p "${{ runner.temp }}/px-scenario-artifacts"
-          uv run --locked --no-sync python -m pytest tests/scenarios -m scenario -v \
-            --basetemp="${{ runner.temp }}/px-scenario-tmp" 2>&1 | tee "${{ runner.temp }}/px-scenario-artifacts/pytest.log"
+          tests/scenarios/env/scenario-env.sh test tests/scenarios -m scenario -v --durations=30 \
+            --basetemp=/tmp/px-scenario-tmp
 
       - name: Collect px scenario logs
         if: failure()
         working-directory: px
         run: |
+          mkdir -p "${{ runner.temp }}/px-scenario-artifacts"
           tests/scenarios/env/scenario-env.sh logs > "${{ runner.temp }}/px-scenario-artifacts/compose.log" 2>&1 || true
-          find "${{ runner.temp }}/px-scenario-tmp" -name 'px-*.log' \
-            -exec cp {} "${{ runner.temp }}/px-scenario-artifacts/" \; 2>/dev/null || true
+          tests/scenarios/env/scenario-env.sh artifacts "${{ runner.temp }}/px-scenario-artifacts" || true
 
       - name: Upload px scenario logs
         if: failure()

@@ -287,16 +287,31 @@ queued release re-checks the `main` SHA before it commits anything.
    release's declared libcurl version (upgrading curl only when needed and
    failing on any mismatch).
 4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheels, explicitly
-   selects the `manylinux` wheel (not `musllinux`), installs it into px's
-   `devel` checkout, and runs px's Docker-backed corporate proxy scenario suite
-   with `PX_REQUIRE_MCURL_FIX=1`. It runs for every release and dry run; a
-   failure prevents publication. The job selects every `scenario`-marked test
-   under px's `tests/scenarios`, so new px scenarios (including the plain-HTTP
-   upload scenarios) run in the gate without workflow changes. The lab is
-   started by px's tests and torn down by the job's always-run cleanup, which
-   calls px's `tests/scenarios/env/scenario-env.sh` (px moved it there from
-   `tools/`). On failure the job uploads the pytest output and the lab's
-   compose and px logs as the `px-scenario-logs` artifact.
+   selects the `manylinux` wheel (not `musllinux`), and runs px's Docker-backed
+   corporate proxy scenario suite against it inside px's `devel` checkout. The
+   job runs for every release and dry run; a failure prevents publication. The
+   job selects every `scenario`-marked test under px's `tests/scenarios`, so
+   new px scenarios (including the plain-HTTP upload scenarios) run in the
+   gate without workflow changes.
+
+   px's scenario lab (`tests/scenarios/env/`) runs Squid, Samba and the origin
+   server as Docker services on a private network, and since px devel commit
+   93dbf22 it also runs pytest and every Px process itself inside that network,
+   in a `client` container, because the runner's own host cannot resolve lab
+   hostnames such as `squid-basic`. The job therefore drives the lab through
+   px's `tests/scenarios/env/scenario-env.sh` (`up`, then `test`, then an
+   always-run `down`) instead of invoking pytest directly: `up` builds and
+   starts the lab, and `test` copies the single candidate wheel into a
+   dedicated directory (`MCURL_WHEELS`), bind-mounts px's checkout into the
+   `client` container, reinstalls pymcurl there from the candidate wheel after
+   `uv sync`, and then runs the suite inside that container. `test` also runs
+   px's own px#268 fix check first, which logs and rejects any imported pymcurl
+   older than 8.23.0.3. Together with the job's exact 8.23.0.3 candidate-wheel
+   check, that confirms the candidate wheel, not some other pymcurl, is what
+   the scenarios exercised. On failure the job
+   uploads the compose logs and the lab's Px logs as the `px-scenario-logs`
+   artifact, collected via `scenario-env.sh logs` and `scenario-env.sh
+   artifacts`.
 5. **`publish`** — first verifies that the resolved release version matches
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
