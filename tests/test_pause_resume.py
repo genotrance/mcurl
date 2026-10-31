@@ -358,28 +358,43 @@ def test_partial_sink_progresses_without_writable_readiness(local_server, multi,
             self.request.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
 
     addr = local_server(Handler)
-    sink = PartialSink(limit=777, ready_calls=1000000)
+    # Block the first suffix so the paused state survives the callback. Some
+    # libcurl backends can otherwise flush every partial write synchronously.
+    sink = PartialSink(limit=777, ready_calls=1)
     curl = mcurl.Curl(_url(addr))
     curl.bridge(None, sink, None)
+    waiter_r, waiter_w = socket.socketpair()
+    waiter_fd = waiter_r.fileno()
+    # libcurl can withdraw all of its socket interest while RECV is paused on
+    # Windows. Keep a valid, idle descriptor in the event loop so this test
+    # always observes the bounded retry wait instead of an implementation-
+    # specific synchronous flush.
+    multi.rlist.add(waiter_fd)
 
     def no_writable_while_paused(readers, writers, errors, timeout):
         if curl._pause_mask & mcurl.libcurl.CURLPAUSE_RECV:
             waits.append(timeout)
             assert timeout <= mcurl.PENDING_WRITE_SELECT_TIMEOUT
             writers = []
+            sink.allow()
         return real_select(readers, writers, errors, timeout)
 
-    patch_mcurl("select", "select", no_writable_while_paused)
-    result = {}
-    worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)), daemon=True)
-    worker.start()
-    worker.join(5)
+    try:
+        patch_mcurl("select", "select", no_writable_while_paused)
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)), daemon=True)
+        worker.start()
+        worker.join(5)
 
-    assert not worker.is_alive(), "partial-sink transfer waited for libcurl's long timer"
-    assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
-    assert waits
-    assert sink.partial > 0
-    assert bytes(sink.data) == body
+        assert not worker.is_alive(), "partial-sink transfer waited for libcurl's long timer"
+        assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
+        assert waits
+        assert sink.partial > 0
+        assert bytes(sink.data) == body
+    finally:
+        multi.rlist.discard(waiter_fd)
+        waiter_r.close()
+        waiter_w.close()
 
 
 @pytest.mark.parametrize("ready_calls", [1000000, 3])
