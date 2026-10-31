@@ -60,6 +60,7 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         self.drop_headers = 0  # Handshakes to cut off in the middle of the 407 headers
         self.refuse_after_close = refuse_after_close  # Stop listening after a 407 with Connection: close
         self.refused = threading.Event()  # Listener was closed and a fresh connection was refused
+        self.probe_outcome = None  # What the fresh connection did when it was not refused
         self.extra_headers = []  # Added to 200 responses
         self.lock = threading.Lock()
         self.challenges = 0  # 407 responses sent, intermediate or final
@@ -75,11 +76,17 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         # the selector loop has stopped before closing the listening socket.
         self.shutdown()
         self.server_close()
+        # Windows refuses a closed loopback port only after seconds of SYN
+        # retries, so the probe waits long enough to see the refusal. Any other
+        # outcome is recorded instead of raised, so the handler still sends 407
+        # and the test assertion reports what happened.
         try:
-            with socket.create_connection(self.server_address, timeout=1):
-                pass
+            with socket.create_connection(self.server_address, timeout=10):
+                self.probe_outcome = "connected"
         except ConnectionRefusedError:
             self.refused.set()
+        except OSError as exc:
+            self.probe_outcome = repr(exc)
 
 
 class _NtlmHandler(socketserver.StreamRequestHandler):
@@ -409,7 +416,7 @@ def test_407_close_then_refused_reconnect_is_inconclusive(ntlm_proxy, connect):
         for _ in range(multi.failure_threshold + 1):
             admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
             assert admitted and not ok
-            assert ntlm_proxy.refused.is_set()
+            assert ntlm_proxy.refused.is_set(), ntlm_proxy.probe_outcome
             assert curl.cerr != 0 and curl.get_os_errno() != 0
             assert curl.resp == 502, (curl.cerr, curl.resp, curl.errstr)
             assert multi.failed.get(ntlm_proxy.url, 0) == 0
