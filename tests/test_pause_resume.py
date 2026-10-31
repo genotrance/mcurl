@@ -317,17 +317,67 @@ def test_timer_callback_stores_deadline(multi, monkeypatch):
     assert waits == [pytest.approx(0.05)]
 
 
-def test_select_value_error_keeps_registered_socket(multi, monkeypatch):
-    """Linux fd >= FD_SETSIZE is not evidence that a socket was closed."""
+def test_socket_callback_tracks_requested_directions(multi):
+    "IN and OUT notifications must not be mistaken for the combined INOUT value."
+    sock_fd = 123
+    mcurl.socket_callback(mcurl.ffi.NULL, sock_fd, mcurl.libcurl.CURL_POLL_IN, mcurl.ffi.NULL, mcurl.ffi.NULL)
+    assert multi.rlist == {sock_fd}
+    assert multi.wlist == set()
+
+    mcurl.socket_callback(mcurl.ffi.NULL, sock_fd, mcurl.libcurl.CURL_POLL_OUT, mcurl.ffi.NULL, mcurl.ffi.NULL)
+    assert multi.rlist == {sock_fd}
+    assert multi.wlist == {sock_fd}
+
+    mcurl.socket_callback(mcurl.ffi.NULL, sock_fd, mcurl.libcurl.CURL_POLL_REMOVE, mcurl.ffi.NULL, mcurl.ffi.NULL)
+    assert multi.rlist == set()
+    assert multi.wlist == set()
+
+
+def test_select_value_error_fails_promptly(multi, monkeypatch):
+    """A live fd beyond select()'s limit must fail explicitly, never stall."""
     multi.rlist = {123}
-    actions = []
     monkeypatch.setattr(mcurl.select, "select", lambda *args: (_ for _ in ()).throw(ValueError("fd out of range")))
-    monkeypatch.setattr(multi, "_socket_action", lambda sock, events: actions.append((sock, events)))
 
-    multi._perform()
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="cannot monitor a registered libcurl socket"):
+        multi._perform()
+    assert time.monotonic() - start < 0.5
 
-    assert multi.rlist == {123}
-    assert actions == [(mcurl.libcurl.CURL_SOCKET_TIMEOUT, 0)]
+
+def test_partial_sink_progresses_without_writable_readiness(local_server, multi, monkeypatch):
+    """Pending sink suffixes are retried without writable socket readiness."""
+    body = _chunk(0, 200000)
+    waits = []
+    real_select = mcurl.select.select
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            self.request.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+
+    addr = local_server(Handler)
+    sink = PartialSink(limit=777, ready_calls=1000000)
+    curl = mcurl.Curl(_url(addr))
+    curl.bridge(None, sink, None)
+
+    def no_writable_while_paused(readers, writers, errors, timeout):
+        if curl._pause_mask & mcurl.libcurl.CURLPAUSE_RECV:
+            waits.append(timeout)
+            assert timeout <= mcurl.PENDING_WRITE_SELECT_TIMEOUT
+            writers = []
+        return real_select(readers, writers, errors, timeout)
+
+    monkeypatch.setattr(mcurl.select, "select", no_writable_while_paused)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)), daemon=True)
+    worker.start()
+    worker.join(5)
+
+    assert not worker.is_alive(), "partial-sink transfer waited for libcurl's long timer"
+    assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
+    assert waits
+    assert sink.partial > 0
+    assert bytes(sink.data) == body
 
 
 @pytest.mark.parametrize("ready_calls", [1000000, 3])
