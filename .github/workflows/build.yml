@@ -165,6 +165,8 @@ jobs:
           path: wheelhouse
 
       - name: Select the candidate wheel
+        env:
+          EXPECTED_VERSION: ${{ needs.setup.outputs.version }}
         run: |
           shopt -s nullglob
           WHEELS=( wheelhouse/pymcurl-*-cp39-abi3-*manylinux*x86_64*.whl )
@@ -175,12 +177,45 @@ jobs:
             exit 1
           fi
           CANDIDATE_VERSION=$(basename "${WHEELS[0]}" | cut -d- -f2)
-          if [ "$CANDIDATE_VERSION" != "8.23.0.3" ]; then
-            echo "Expected pymcurl candidate version 8.23.0.3, found $CANDIDATE_VERSION"
+          if [ "$CANDIDATE_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "Expected pymcurl candidate version $EXPECTED_VERSION, found $CANDIDATE_VERSION"
             exit 1
           fi
           mkdir -p "${{ runner.temp }}/mcurl-candidate-wheel"
           cp "${WHEELS[0]}" "${{ runner.temp }}/mcurl-candidate-wheel/"
+
+      - name: Require the expected pymcurl version in the scenario client
+        env:
+          EXPECTED_VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          python3 - "$EXPECTED_VERSION" <<'PY'
+          import pathlib
+          import sys
+
+          expected = sys.argv[1]
+          scenario_env = pathlib.Path("px/tests/scenarios/env/scenario-env.sh")
+          check = pathlib.Path("px/.github/actions/mcurl-devel/check.py")
+
+          text = scenario_env.read_text()
+          needle = '        -e "MCURL_WHEELS=$wheels" \\\n'
+          replacement = needle + '        -e "MCURL_EXPECTED_VERSION=${MCURL_EXPECTED_VERSION:-}" \\\n'
+          if needle not in text:
+              raise SystemExit("could not forward MCURL_EXPECTED_VERSION to the scenario client")
+          scenario_env.write_text(text.replace(needle, replacement, 1))
+
+          text = check.read_text()
+          needle = "MINIMUM = (8, 23, 0, 3)\n"
+          replacement = f'EXPECTED_VERSION = "{expected}"\n'
+          if needle not in text:
+              raise SystemExit("could not configure the scenario client version check")
+          text = text.replace(needle, replacement, 1)
+          text = text.replace(
+              "parse(version) >= MINIMUM, f\"pymcurl {version} is older than {MINIMUM}\"",
+              "version == EXPECTED_VERSION, "
+              'f"pymcurl {version} does not match expected {EXPECTED_VERSION}"',
+          )
+          check.write_text(text)
+          PY
 
       - name: Bring up the corporate proxy scenario environment
         working-directory: px
@@ -192,14 +227,15 @@ jobs:
       # squid-basic). scenario-env.sh test bind-mounts the px checkout into
       # the client container, copies the candidate wheel directory in at the
       # same path, and reinstalls pymcurl from it after uv sync. It then runs
-      # px's own px#268 fix check, which fails the job unless the pymcurl
-      # imported in the client is >= 8.23.0.3. The selection above requires
-      # the sole source wheel to be exactly 8.23.0.3, confirming that
-      # candidate wheel is what scenarios actually exercised.
+      # px's own fix check, configured above to require the setup job's
+      # expected version. The selection above requires the sole source wheel
+      # to have that same version, confirming that candidate wheel is what
+      # scenarios actually exercised.
       - name: Run px corporate proxy scenarios
         working-directory: px
         env:
           MCURL_WHEELS: ${{ runner.temp }}/mcurl-candidate-wheel
+          MCURL_EXPECTED_VERSION: ${{ needs.setup.outputs.version }}
         run: |
           tests/scenarios/env/scenario-env.sh test tests/scenarios -m scenario -v --durations=30 \
             --basetemp=/tmp/px-scenario-tmp

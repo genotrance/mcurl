@@ -304,11 +304,11 @@ queued release re-checks the `main` SHA before it commits anything.
    starts the lab, and `test` copies the single candidate wheel into a
    dedicated directory (`MCURL_WHEELS`), bind-mounts px's checkout into the
    `client` container, reinstalls pymcurl there from the candidate wheel after
-   `uv sync`, and then runs the suite inside that container. `test` also runs
-   px's own px#268 fix check first, which logs and rejects any imported pymcurl
-   older than 8.23.0.3. Together with the job's exact 8.23.0.3 candidate-wheel
-   check, that confirms the candidate wheel, not some other pymcurl, is what
-   the scenarios exercised. On failure the job
+   `uv sync`, and then runs the suite inside that container. The workflow
+   derives the expected version from the setup job, requires both the wheel
+   filename and the pymcurl imported by the scenario client to match it, and
+   then runs px's fix check and the suite. This confirms the candidate wheel,
+   not some other pymcurl, is what the scenarios exercised. On failure the job
    uploads the compose logs and the lab's Px logs as the `px-scenario-logs`
    artifact, collected via `scenario-env.sh logs` and `scenario-env.sh
    artifacts`.
