@@ -172,8 +172,14 @@ jobs:
         run: |
           uv venv --python 3.13 .venv
           uv sync --locked
-          WHEEL=$(find ../wheelhouse -name 'pymcurl-*-cp39-abi3-*.whl' -print -quit)
-          test -n "$WHEEL"
+          WHEELS=( ../wheelhouse/pymcurl-*-cp39-abi3-*manylinux*x86_64*.whl )
+          if [ ${#WHEELS[@]} -ne 1 ]; then
+            echo "Expected exactly one manylinux x86_64 cp39-abi3 wheel, found ${#WHEELS[@]}"
+            echo "Available wheels:"
+            ls ../wheelhouse/*.whl 2>/dev/null || echo "No wheels found"
+            exit 1
+          fi
+          WHEEL="${WHEELS[0]}"
           uv pip install --python .venv/bin/python --reinstall "$WHEEL"
           .venv/bin/python -c "import mcurl; print(mcurl.curl_version())"
 
