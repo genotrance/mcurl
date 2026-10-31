@@ -83,6 +83,7 @@ class PausingSink:
     def __init__(self):
         self.data = bytearray()
         self.pause_count = 0
+        self.paused = threading.Event()
         self._allowed = threading.Event()
 
     def allow(self):
@@ -91,6 +92,7 @@ class PausingSink:
     def write(self, buf):
         if not self._allowed.is_set():
             self.pause_count += 1
+            self.paused.set()
             return None
         self.data += bytes(buf)
         return len(buf)
@@ -234,7 +236,7 @@ def test_resume_wakes_blocked_select():
         multi.close()
 
 
-def test_select_error_flushes_pending_completion(multi, monkeypatch):
+def test_select_error_flushes_pending_completion(multi, patch_mcurl):
     """A stale Windows socket must not strand a partial sink's final suffix."""
 
     class Sink:
@@ -256,14 +258,14 @@ def test_select_error_flushes_pending_completion(multi, monkeypatch):
     def select_error(*args):
         raise OSError(10038, "not a socket")
 
-    monkeypatch.setattr(mcurl.select, "select", select_error)
+    patch_mcurl("select", "select", select_error)
     multi._perform()
     assert bytes(sink.data) == b"final suffix"
     assert not curl._wpending
     assert curl.done
 
 
-def test_flush_unpause_runs_timeout_without_writable_socket(multi, monkeypatch):
+def test_flush_unpause_runs_timeout_without_writable_socket(multi, monkeypatch, patch_mcurl):
     """A Windows-style pause can remove writable interest while a suffix waits.
 
     The selected read event flushes the suffix, but does not itself prove that
@@ -291,7 +293,7 @@ def test_flush_unpause_runs_timeout_without_writable_socket(multi, monkeypatch):
         assert curl._pause_mask & mcurl.libcurl.CURLPAUSE_RECV
         return [123], [], []
 
-    monkeypatch.setattr(mcurl.select, "select", windows_paused_select)
+    patch_mcurl("select", "select", windows_paused_select)
     monkeypatch.setattr(multi, "_socket_action", lambda sock, events: actions.append((sock, events)))
     multi._perform()
 
@@ -303,11 +305,11 @@ def test_flush_unpause_runs_timeout_without_writable_socket(multi, monkeypatch):
     ]
 
 
-def test_timer_callback_stores_deadline(multi, monkeypatch):
+def test_timer_callback_stores_deadline(multi, patch_mcurl):
     now = [100.0]
     waits = []
-    monkeypatch.setattr(mcurl.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(mcurl.select, "select", lambda *args: waits.append(args[-1]) or ([], [], []))
+    patch_mcurl("time", "monotonic", lambda: now[0])
+    patch_mcurl("select", "select", lambda *args: waits.append(args[-1]) or ([], [], []))
     multi.rlist = {123}
 
     mcurl.multi_timer_callback(mcurl.ffi.NULL, 250, mcurl.ffi.NULL)
@@ -333,10 +335,10 @@ def test_socket_callback_tracks_requested_directions(multi):
     assert multi.wlist == set()
 
 
-def test_select_value_error_fails_promptly(multi, monkeypatch):
+def test_select_value_error_fails_promptly(multi, patch_mcurl):
     """A live fd beyond select()'s limit must fail explicitly, never stall."""
     multi.rlist = {123}
-    monkeypatch.setattr(mcurl.select, "select", lambda *args: (_ for _ in ()).throw(ValueError("fd out of range")))
+    patch_mcurl("select", "select", lambda *args: (_ for _ in ()).throw(ValueError("fd out of range")))
 
     start = time.monotonic()
     with pytest.raises(RuntimeError, match="cannot monitor a registered libcurl socket"):
@@ -344,7 +346,7 @@ def test_select_value_error_fails_promptly(multi, monkeypatch):
     assert time.monotonic() - start < 0.5
 
 
-def test_partial_sink_progresses_without_writable_readiness(local_server, multi, monkeypatch):
+def test_partial_sink_progresses_without_writable_readiness(local_server, multi, patch_mcurl):
     """Pending sink suffixes are retried without writable socket readiness."""
     body = _chunk(0, 200000)
     waits = []
@@ -367,7 +369,7 @@ def test_partial_sink_progresses_without_writable_readiness(local_server, multi,
             writers = []
         return real_select(readers, writers, errors, timeout)
 
-    monkeypatch.setattr(mcurl.select, "select", no_writable_while_paused)
+    patch_mcurl("select", "select", no_writable_while_paused)
     result = {}
     worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)), daemon=True)
     worker.start()
@@ -381,7 +383,7 @@ def test_partial_sink_progresses_without_writable_readiness(local_server, multi,
 
 
 @pytest.mark.parametrize("ready_calls", [1000000, 3])
-def test_stale_socket_cannot_strand_partial_write_transfer(local_server, multi, monkeypatch, ready_calls):
+def test_stale_socket_cannot_strand_partial_write_transfer(local_server, multi, patch_mcurl, ready_calls):
     "A dead descriptor left in the socket lists must be dropped, not make every later select() fail"
     body = _chunk(0, 200000)
     stale = 54321
@@ -404,7 +406,7 @@ def test_stale_socket_cannot_strand_partial_write_transfer(local_server, multi, 
     sink = PartialSink(limit=777, ready_calls=ready_calls)
     curl = mcurl.Curl(_url(addr))
     curl.bridge(None, sink, None)
-    monkeypatch.setattr(mcurl.select, "select", select_with_stale)
+    patch_mcurl("select", "select", select_with_stale)
     multi.rlist.add(stale)
     multi.wlist.add(stale)
 
@@ -543,8 +545,9 @@ def test_paused_write_resumed_from_other_thread(local_server, multi):
 
     worker = threading.Thread(target=run)
     worker.start()
-    time.sleep(0.2)
-    assert sink.pause_count >= 1, "download never paused"
+    # Wait for the first pause rather than a fixed delay: a loaded macOS
+    # runner may need more than 0.2 s just to connect and receive the body.
+    assert sink.paused.wait(5), "download never paused"
     assert bytes(sink.data) != body
 
     sink.allow()

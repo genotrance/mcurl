@@ -8,7 +8,7 @@ Tests are split across multiple files in `tests/`:
 
 | File | Scope |
 |------|-------|
-| `conftest.py` | Shared fixtures (`method`, `is_multi`, `is_debug`, `query` helper) |
+| `conftest.py` | Shared fixtures (`method`, `is_multi`, `is_debug`, `patch_mcurl`, `query` helper) |
 | `test_easy.py` | `Curl` class tests: HTTP methods, headers, redirects, user-agent, reset, binary, `get_os_errno`/`get_errorbuffer` (including that the errno survives a later successful connect), etc. |
 | `test_multi.py` | `MCurl` class tests: concurrent handles, threaded do/stop/close, add/remove |
 | `test_auth.py` | Auth-related: `getauth()`, proxy auth, failure threshold |
@@ -235,6 +235,22 @@ Defined in `conftest.py`:
 - **`is_multi`** — parametrized: `False`, `True`
 - **`is_debug`** — parametrized: `False`, `True`
 - **`httpbin_both`** — provided by `pytest-httpbin`, serves both HTTP and HTTPS
+- **`patch_mcurl`** — `patch_mcurl("select", "select", fake)` or
+  `patch_mcurl("time", "monotonic", fake)` replaces a stdlib function as seen
+  by `mcurl` only, by swapping `mcurl`'s module reference for a view that
+  falls through to the real module. Tests must not patch the shared module
+  (`monkeypatch.setattr(mcurl.select, ...)`): that also hijacks every other
+  thread. On Windows `socketserver` polls through a call-time lookup of
+  `select.select`, so on devel 57bf9b6 a fake select from
+  `test_partial_sink_progresses_without_writable_readiness` raised inside the
+  session `pytest-httpbin` HTTPS server thread and killed it, and the later
+  `test_untrusted_certificate_rejected` timed out (error 28) instead of
+  failing verification. Linux binds `select.select` at import, which hid it.
+
+Tests that wait for a background transfer to reach a state (for example the
+first write pause) wait on a `threading.Event` with a generous timeout rather
+than a fixed `time.sleep()`: a 0.2 s sleep was too short on a loaded macOS
+runner for `test_paused_write_resumed_from_other_thread`.
 
 The `query()` helper function creates a `Curl` instance, performs a request,
 and asserts success. Used by many tests to reduce boilerplate.
