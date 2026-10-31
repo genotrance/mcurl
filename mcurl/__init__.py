@@ -586,6 +586,8 @@ class Curl:
         dprint(self.easyhash + ": Resetting curl")
         if self._probe_proxy is not None:
             MCURL._release_probe(self)
+        if MCURL is not None:
+            MCURL._drop_pending_resume(self)
         libcurl.curl_easy_reset(self.easy)
         self.sock_fd = None
         self._clear_write_state()
@@ -1762,6 +1764,8 @@ class MCurl:
     def _finish(curl, result):
         curl._wdone = None
         curl.done = True
+        if curl._wfail:
+            result = libcurl.CURLE_WRITE_ERROR
         if result != libcurl.CURLE_OK:
             curl.cerr = result
 
@@ -1792,6 +1796,11 @@ class MCurl:
         with self._resume_lock:
             self._pending_resume[curl.easyhash] = self._pending_resume.get(curl.easyhash, 0) | bitmask
         self._wake()
+
+    def _drop_pending_resume(self, curl):
+        # A persistent easyhash must not carry a previous transfer's resume.
+        with self._resume_lock:
+            self._pending_resume.pop(curl.easyhash, None)
 
     def _wake(self):
         # Interrupt a select() blocked waiting for socket activity
@@ -1826,6 +1835,7 @@ class MCurl:
         # Add a handle
         dprint(curl.easyhash + ": Add handle")
         if curl.easyhash not in self.handles:
+            self._drop_pending_resume(curl)
             curl._prepare_expect()
             self.handles[curl.easyhash] = curl
             libcurl.curl_multi_add_handle(self._multi, curl.easy)
@@ -1843,6 +1853,7 @@ class MCurl:
 
     def _remove_handle(self, curl: Curl, errstr=""):
         # Remove a handle and set status
+        self._drop_pending_resume(curl)
         if curl.easyhash not in self.handles:
             return
 

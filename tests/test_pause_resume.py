@@ -126,6 +126,28 @@ class PartialSink:
         return n
 
 
+class CompletionFailSink:
+    "Sink that first accepts a partial chunk, then fails while flushing its suffix."
+
+    def __init__(self):
+        self.data = bytearray()
+        self.partial = False
+        self._fail = threading.Event()
+
+    def fail(self):
+        self._fail.set()
+
+    def write(self, buf):
+        if not self.partial:
+            self.partial = True
+            n = min(len(buf), 100)
+            self.data += bytes(buf[:n])
+            return n
+        if self._fail.is_set():
+            raise ConnectionError
+        return None
+
+
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -396,3 +418,68 @@ def test_partial_write_pending_at_completion_is_flushed(local_server, multi):
     assert not worker.is_alive()
     assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
     assert bytes(sink.data) == body
+
+
+def test_partial_write_flush_failure_at_completion_is_write_error(local_server, multi):
+    "A final pending suffix that cannot reach its sink must fail the transfer."
+    body = b"z" * 5000
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(4096)
+            self.request.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+
+    addr = local_server(Handler)
+    sink = CompletionFailSink()
+    curl = mcurl.Curl(_url(addr))
+    curl.bridge(None, sink, None)
+
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(ok=multi.do(curl)))
+    worker.start()
+    time.sleep(0.3)
+    assert worker.is_alive()
+    assert sink.partial
+
+    sink.fail()
+    curl.resume_download()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert result["ok"] is False
+    assert curl.cerr == mcurl.libcurl.CURLE_WRITE_ERROR
+    assert curl._wfail
+    assert not curl._wpending
+
+
+def test_queued_resume_does_not_leak_to_reused_handle(multi):
+    "Resumes from a prior transfer cannot clear a pause on a reused Curl."
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    recv = mcurl.libcurl.CURLPAUSE_RECV
+
+    def resume_from_thread():
+        worker = threading.Thread(target=multi.resume, args=(curl, recv))
+        worker.start()
+        worker.join(1)
+        assert not worker.is_alive()
+
+    multi.add(curl)
+    resume_from_thread()
+    assert multi._pending_resume == {curl.easyhash: recv}
+
+    multi.remove(curl)
+    assert multi._pending_resume == {}
+
+    resume_from_thread()
+    assert multi._pending_resume == {curl.easyhash: recv}
+    curl.reset("http://127.0.0.1:1/")
+    assert multi._pending_resume == {}
+
+    resume_from_thread()
+    assert multi._pending_resume == {curl.easyhash: recv}
+    multi.add(curl)
+    assert multi._pending_resume == {}
+    curl._pause_mask = recv
+    with multi._lock:
+        assert not multi._apply_pending_resumes()
+    assert curl._pause_mask == recv
+    multi.remove(curl)
