@@ -286,16 +286,17 @@ queued release re-checks the `main` SHA before it commits anything.
    macOS runs `tools/brew_curl.sh` before compilation so its wheel uses the
    release's declared libcurl version (upgrading curl only when needed and
    failing on any mismatch).
-4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheel, installs
-   it into px's `devel` checkout, and runs px's Docker-backed corporate proxy
-   scenario suite with `PX_REQUIRE_MCURL_FIX=1`. It runs for every release and
-   dry run; a failure prevents publication. The job selects every
-   `scenario`-marked test under px's `tests/scenarios`, so new px scenarios
-   (including the plain-HTTP upload scenarios) run in the gate without workflow
-   changes. The lab is started by px's tests and torn down by the job's
-   always-run cleanup, which calls px's `tests/scenarios/env/scenario-env.sh`
-   (px moved it there from `tools/`). On failure the job uploads the pytest
-   output and the lab's compose and px logs as the `px-scenario-logs` artifact.
+4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheels, explicitly
+   selects the `manylinux` wheel (not `musllinux`), installs it into px's
+   `devel` checkout, and runs px's Docker-backed corporate proxy scenario suite
+   with `PX_REQUIRE_MCURL_FIX=1`. It runs for every release and dry run; a
+   failure prevents publication. The job selects every `scenario`-marked test
+   under px's `tests/scenarios`, so new px scenarios (including the plain-HTTP
+   upload scenarios) run in the gate without workflow changes. The lab is
+   started by px's tests and torn down by the job's always-run cleanup, which
+   calls px's `tests/scenarios/env/scenario-env.sh` (px moved it there from
+   `tools/`). On failure the job uploads the pytest output and the lab's
+   compose and px logs as the `px-scenario-logs` artifact.
 5. **`publish`** — first verifies that the resolved release version matches
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
