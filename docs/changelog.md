@@ -5,62 +5,15 @@
 ## v8.23.0.3 — TBD
 
 ### Bug fixes
-- Proxy auth failures now count only the final CONNECT 407 response, not
-  CONNECT handshakes cut short by network errors. A working NTLM/Negotiate
-  proxy is no longer reported as failing (px#268). Transfers with such
-  errors report the network error (502) instead of 401.
-- A complete NTLM type2 challenge followed by a network cut no longer blocks
-  a working proxy when libcurl resumes the connection-bound handshake by
-  sending type3 on a new connection. mcurl retries once on a fresh connection
-  and counts only that outcome; non-rewindable request bodies remain
-  inconclusive (503) instead of being counted as bad credentials.
-- A genuine final CONNECT 407 is now counted (401) even when an earlier
-  socket failure occurred in the same transfer, such as a refused first
-  address. The decision uses libcurl's error message instead of the OS errno.
-- A failed proxy auth method is no longer cached: only a successful
-  non-407 response caches the method, and a final 407 or
-  `reset_proxy_failures()` clears the cached entry. Previously a failed
-  `ANY` attempt could override the auth later requested and keep the proxy
-  blocked even with `auth_retry`.
-- A plain-HTTP 407 whose headers are cut off mid-response is inconclusive
-  (502) rather than counted as an auth failure.
-- Only an HTTP status line with code 407 starts upstream 407 header
-  suppression; other headers merely containing "407" are passed to the client.
-- With auth `ANY` on Linux/macOS, a proxy offering both Negotiate and NTLM no
-  longer blocks after 3 requests when there is no Kerberos ticket. libcurl
-  picks Negotiate and GSS-API fails locally without ever trying NTLM, which
-  the proxy also offered; `MCurl.do()` now retries once with Negotiate
-  removed from the auth mask so the next attempt uses NTLM, and only counts
-  an auth failure if that attempt also fails. Windows SSPI already falls
-  back to NTLM internally and is unaffected.
-- POST/PUT request bodies sent through the read callback are now resent
-  across proxy auth legs and the Negotiate-to-NTLM retry. With auth `ANY`
-  libcurl sends the body on the first unauthenticated leg and rewinds to
-  resend it; the read budget was not restored on rewind, so such requests
-  failed with Curl error 26 (resp 503). A body source that cannot be
-  rewound makes the NTLM retry inconclusive (503) rather than an auth failure.
-- `bridge()` uploads stream through proxy auth without rewinding (no more
-  curl error 65), chunked bodies are no longer dropped, and PATCH no longer
-  buffers its body.
-- A `bridge()` upload sent immediately after a prior request through the
-  same not-yet-cached proxy no longer fails with curl error 65 (503). The
-  Expect decision now always matches what was actually configured for proxy
-  auth, and a known NTLM/Digest method still uses `Expect: 100-continue` so
-  a stale or closed proxy connection cannot consume the body before libcurl
-  notices.
+- Proxy authentication now counts only genuine final CONNECT 407 responses and handles interrupted handshakes and incomplete 407 responses correctly (genotrance/px#268).
+- Failed proxy authentication methods are no longer cached, so a later requested method can be tried normally.
+- On Linux and macOS, `auth=ANY` now falls back from Negotiate to NTLM when local GSS-API authentication fails.
+- POST and PUT bodies are resent correctly across proxy-auth retries, while non-rewindable sources remain inconclusive instead of being reported as bad credentials.
+- `bridge()` uploads now pass through proxy authentication without curl error 65, preserve chunked and PATCH bodies, and avoid stale `Expect` handling on reused proxies.
 
 ### New features
 - Added `Curl.get_os_errno()` and `Curl.get_errorbuffer()`.
-- `bridge()` body sources and response sinks can now be non-blocking: a
-  `client_rfile.read()`/`client_wfile.write()` that returns `None` (or raises
-  `BlockingIOError`) pauses the transfer instead of blocking, and
-  `Curl.resume_upload()`/`Curl.resume_download()` resume it from any thread.
-  One stalled or slow streaming client no longer stalls every other transfer
-  on the same `MCurl`.
-
-### Internal
-- NTLM proxy tests gate on `CURL_VERSION_NTLM` rather than platform or
-  Python version, since Homebrew libcurl on macOS can omit NTLM.
+- `bridge()` sources and sinks can now be non-blocking; `Curl.resume_upload()` and `Curl.resume_download()` resume paused transfers, including response sinks that accept only partial writes.
 
 ---
 
