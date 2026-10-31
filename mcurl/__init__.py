@@ -371,10 +371,14 @@ class Curl:
     _expect_pending = False
     # CURLPAUSE_SEND/CURLPAUSE_RECV bits currently paused on this handle
     _pause_mask = 0
-    # Bumped by MCurl._add_handle() each time this easy handle is activated
-    # for a transfer; lets a queued resume() request be told apart from one
-    # meant for a transfer that previously used the same handle
-    _generation = 0
+    # Identifies the transfer this handle is configured for (transfer_id);
+    # bumped when a transfer ends for good (MCurl.remove()/stop(), reset()) so
+    # a resume() captured for an earlier transfer can be told apart from one
+    # for a later reuse of the same handle
+    _transfer_id = 0
+    # True from the end of MCurl._add_handle() until the handle leaves the
+    # multi handle or is reset; resume() is only queued while it is set
+    _active = False
     # Unwritten suffix of a chunk client_wfile.write() accepted only partially
     _wpending = b""
     # client_wfile failed while flushing _wpending; abort on next write
@@ -591,7 +595,9 @@ class Curl:
         if self._probe_proxy is not None:
             MCURL._release_probe(self)
         if MCURL is not None:
-            MCURL._drop_pending_resume(self)
+            MCURL._drop_pending_resume(self, end=True)
+        else:
+            self._transfer_id += 1
         libcurl.curl_easy_reset(self.easy)
         self.sock_fd = None
         self._clear_write_state()
@@ -1268,25 +1274,40 @@ class Curl:
         "Resume all paused transfers on this handle"
         return libcurl.curl_easy_pause(self.easy, libcurl.CURLPAUSE_CONT)
 
-    def resume_upload(self):
+    @property
+    def transfer_id(self):
+        """Identity of the transfer this handle is configured for.
+
+        Capture it after configuring a transfer and before starting it, and
+        pass it to resume_upload()/resume_download() so a late resume cannot
+        reach a later transfer that reuses this handle. It changes once the
+        transfer ends for good: MCurl.remove()/stop() or reset().
+        """
+        return self._transfer_id
+
+    def resume_upload(self, transfer_id=None):
         """Thread-safe: resume a request body paused by read_callback returning CURL_READFUNC_PAUSE.
 
         Call this from any thread once client_rfile.read() has more data (or
         EOF) to give; see bridge() in the Streamed request bodies docs for the
         non-blocking read() contract. Only meaningful for a handle driven
-        through MCurl.do()/add() (the multi interface).
+        through MCurl.do()/add() (the multi interface). See MCurl.resume() for
+        transfer_id and the return value.
         """
-        if MCURL is not None:
-            MCURL.resume(self, libcurl.CURLPAUSE_SEND)
+        if MCURL is None:
+            return False
+        return MCURL.resume(self, libcurl.CURLPAUSE_SEND, transfer_id)
 
-    def resume_download(self):
+    def resume_download(self, transfer_id=None):
         """Thread-safe: resume a response paused by write_callback returning CURL_WRITEFUNC_PAUSE.
 
         Call this from any thread once client_wfile.write() can accept more
         data. Only meaningful for a handle driven through MCurl.do()/add().
+        See MCurl.resume() for transfer_id and the return value.
         """
-        if MCURL is not None:
-            MCURL.resume(self, libcurl.CURLPAUSE_RECV)
+        if MCURL is None:
+            return False
+        return MCURL.resume(self, libcurl.CURLPAUSE_RECV, transfer_id)
 
     # Transfer progress callback (section 12)
 
@@ -1786,32 +1807,49 @@ class MCurl:
                     curl._pause_mask &= ~libcurl.CURLPAUSE_RECV
                     libcurl.curl_easy_pause(curl.easy, curl._pause_mask)
 
-    def resume(self, curl: Curl, bitmask=None):
+    def resume(self, curl: Curl, bitmask=None, transfer_id=None):
         """Thread-safe: queue curl to resume a paused direction, from any thread.
 
         bitmask is the CURLPAUSE_SEND and/or CURLPAUSE_RECV bits to clear;
         None clears both. curl_easy_pause() itself is only ever called by the
         thread currently driving the multi handle inside _perform(), while it
         holds self._lock, so a resume request here only records the request
-        and wakes that thread instead of calling it directly. The request is
-        tagged with curl._generation as it stands right now, so a request
-        that is still queued once curl has been reused for a later transfer
-        (a higher generation) is recognised as stale instead of being applied
-        to that later transfer; see _add_handle().
+        and wakes that thread instead of calling it directly.
+
+        transfer_id is curl.transfer_id as captured by the caller for the
+        transfer it means to resume. Returns True if the request was queued,
+        False if it was discarded because transfer_id is no longer curl's
+        current transfer or curl is not running in this multi handle (nothing
+        of that transfer can be paused). Without transfer_id the request is
+        only unambiguous while curl runs its first transfer: once curl has
+        been reused (remove()/stop()/reset()), a running handle raises
+        ValueError rather than guess which transfer a late call was meant for.
         """
         if bitmask is None:
             bitmask = libcurl.CURLPAUSE_ALL
         with self._resume_lock:
-            generation, bits = self._pending_resume.get(curl.easyhash, (curl._generation, 0))
-            if generation != curl._generation:
-                bits = 0
-            self._pending_resume[curl.easyhash] = (curl._generation, bits | bitmask)
+            # Checked and queued under the same lock that ends or deactivates
+            # a transfer (_drop_pending_resume()), so a request is either
+            # queued for the running transfer and dropped with it, or refused
+            if transfer_id is not None and transfer_id != curl._transfer_id:
+                return False
+            if not curl._active:
+                return False
+            if transfer_id is None and curl._transfer_id != 0:
+                raise ValueError(curl.easyhash + ": resume() of a reused Curl needs its transfer_id")
+            bits = self._pending_resume.get(curl.easyhash, (curl._transfer_id, 0))[1]
+            self._pending_resume[curl.easyhash] = (curl._transfer_id, bits | bitmask)
         self._wake()
+        return True
 
-    def _drop_pending_resume(self, curl):
-        # A persistent easyhash must not carry a previous transfer's resume.
+    def _drop_pending_resume(self, curl, end=False):
+        # A persistent easyhash must not carry a previous transfer's resume;
+        # end=True also ends curl's transfer so its transfer_id goes stale
         with self._resume_lock:
             self._pending_resume.pop(curl.easyhash, None)
+            curl._active = False
+            if end:
+                curl._transfer_id += 1
 
     def _wake(self):
         # Interrupt a select() blocked waiting for socket activity
@@ -1831,12 +1869,10 @@ class MCurl:
             pending = self._pending_resume
             self._pending_resume = {}
         applied = False
-        for easyhash, (generation, clear_bits) in pending.items():
+        for easyhash, (transfer_id, clear_bits) in pending.items():
             curl = self.handles.get(easyhash)
-            if curl is None or curl._generation != generation:
-                # Either gone, or curl was reused for a later transfer after
-                # this request was queued against an earlier one - discard it
-                # rather than misapply it to a transfer it was never about.
+            if curl is None or not curl._active or curl._transfer_id != transfer_id:
+                # Ended since it was queued (reset() does not hold self._lock)
                 continue
             applied = True
             if clear_bits & libcurl.CURLPAUSE_RECV and curl._wpending and not curl._flush_pending():
@@ -1855,13 +1891,10 @@ class MCurl:
             curl._prepare_expect()
             self.handles[curl.easyhash] = curl
             libcurl.curl_multi_add_handle(self._multi, curl.easy)
-            # Only now, with the handle fully active, start a new generation:
-            # resume() tags every request with curl._generation as of when it
-            # is called, so one that raced in anywhere above (even after the
-            # drop) still carries the old value and _apply_pending_resumes()
-            # will find it stale instead of clearing a pause on this transfer.
+            # Only now accept resume() requests: one that raced in anywhere
+            # above (even after the drop) was refused as not running
             with self._resume_lock:
-                curl._generation += 1
+                curl._active = True
             dprint(curl.easyhash + ": Added handle")
         else:
             dprint(curl.easyhash + ": Active handle")
@@ -1874,9 +1907,10 @@ class MCurl:
 
     # Removing from multi
 
-    def _remove_handle(self, curl: Curl, errstr=""):
-        # Remove a handle and set status
-        self._drop_pending_resume(curl)
+    def _remove_handle(self, curl: Curl, errstr="", end=False):
+        # Remove a handle and set status; end=True for remove()/stop(), not
+        # for do() retrying the same transfer
+        self._drop_pending_resume(curl, end)
         if curl.easyhash not in self.handles:
             return
 
@@ -1897,14 +1931,14 @@ class MCurl:
     def remove(self, curl: Curl):
         "Remove a completed Curl handle from the multi instance"
         with self._lock:
-            self._remove_handle(curl)
+            self._remove_handle(curl, end=True)
         if curl._probe_proxy is not None:
             self._release_probe(curl)
 
     def stop(self, curl: Curl):
         "Abort a running Curl handle and remove it from the multi instance"
         with self._lock:
-            self._remove_handle(curl, errstr="Stopped")
+            self._remove_handle(curl, errstr="Stopped", end=True)
 
     # Executing multi
 
@@ -2305,7 +2339,7 @@ class MCurl:
         with self._lock:
             pending = list(self.handles.values())
             for curl in pending:
-                self._remove_handle(curl, errstr="Stopped")
+                self._remove_handle(curl, errstr="Stopped", end=True)
             libcurl.curl_multi_cleanup(self._multi)
         self._wake_r.close()
         self._wake_w.close()

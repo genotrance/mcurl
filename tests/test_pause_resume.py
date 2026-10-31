@@ -222,7 +222,7 @@ def test_resume_wakes_blocked_select():
         worker = threading.Thread(target=run)
         worker.start()
         time.sleep(0.1)
-        fake_curl = type("FakeCurl", (), {"easyhash": "does-not-exist", "_generation": 0})()
+        fake_curl = type("FakeCurl", (), {"easyhash": "does-not-exist", "_transfer_id": 0, "_active": True})()
         multi.resume(fake_curl)
         worker.join(2)
         assert elapsed, "background _perform() never returned"
@@ -451,74 +451,233 @@ def test_partial_write_flush_failure_at_completion_is_write_error(local_server, 
     assert not curl._wpending
 
 
-def test_queued_resume_does_not_leak_to_reused_handle(multi):
-    "Resumes from a prior transfer cannot clear a pause on a reused Curl."
-    curl = mcurl.Curl("http://127.0.0.1:1/")
-    recv = mcurl.libcurl.CURLPAUSE_RECV
+SEND = mcurl.libcurl.CURLPAUSE_SEND
+RECV = mcurl.libcurl.CURLPAUSE_RECV
 
-    def resume_from_thread():
-        worker = threading.Thread(target=multi.resume, args=(curl, recv))
-        worker.start()
-        worker.join(1)
-        assert not worker.is_alive()
 
-    multi.add(curl)
-    assert curl._generation == 1
-    resume_from_thread()
-    assert multi._pending_resume == {curl.easyhash: (1, recv)}
+def _public_resume(curl, bit, transfer_id=None):
+    if bit == SEND:
+        return curl.resume_upload(transfer_id)
+    return curl.resume_download(transfer_id)
 
-    multi.remove(curl)
-    assert multi._pending_resume == {}
 
-    resume_from_thread()
-    assert multi._pending_resume == {curl.easyhash: (1, recv)}
-    curl.reset("http://127.0.0.1:1/")
-    assert multi._pending_resume == {}
+class _LateCall(threading.Thread):
+    """A foreign-thread call that is already in flight but only executes once go() is called.
 
-    resume_from_thread()
-    assert multi._pending_resume == {curl.easyhash: (1, recv)}
-    multi.add(curl)
-    assert curl._generation == 2
-    assert multi._pending_resume == {}
-    curl._pause_mask = recv
+    Stands in for a resume() whose thread was descheduled (GIL, OS, or a
+    slow event loop) for as long as the test needs: everything the call
+    captured (the Curl and any transfer_id) is bound before the delay.
+    """
+
+    def __init__(self, fn, *args):
+        super().__init__(daemon=True)
+        self._fn = fn
+        self._args = args
+        self._go = threading.Event()
+        self.result = None
+        self.error = None
+        self.start()
+
+    def run(self):
+        self._go.wait()
+        try:
+            self.result = self._fn(*self._args)
+        except Exception as exc:
+            self.error = exc
+
+    def go(self):
+        self._go.set()
+        self.join(2)
+        assert not self.is_alive(), "late resume() call did not complete"
+        return self
+
+
+def _end_transfer(multi, curl, ending):
+    if ending in ("remove", "remove+reset"):
+        multi.remove(curl)
+    else:
+        multi.stop(curl)
+    if ending != "remove":
+        curl.reset("http://127.0.0.1:1/")
+
+
+def _apply(multi):
     with multi._lock:
-        assert not multi._apply_pending_resumes()
-    assert curl._pause_mask == recv
+        return multi._apply_pending_resumes()
+
+
+@pytest.mark.parametrize("bit", [SEND, RECV], ids=["send", "recv"])
+@pytest.mark.parametrize("ending", ["remove", "remove+reset", "stop+reset"])
+@pytest.mark.parametrize("next_paused", [False, True], ids=["before-next-pause", "after-next-pause"])
+def test_late_resume_cannot_cross_into_next_transfer(multi, bit, ending, next_paused):
+    """T40952da8: a resume meant for transfer 1 that only executes once the same Curl
+    runs transfer 2 must not clear transfer 2's pause, whether it lands before or
+    after transfer 2 pauses that direction for its own reason.
+    """
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    multi.add(curl)
+    first = curl.transfer_id
+    late_with_id = _LateCall(_public_resume, curl, bit, first)
+    late_without_id = _LateCall(_public_resume, curl, bit)
+
+    _end_transfer(multi, curl, ending)
+    multi.add(curl)
+    assert curl.transfer_id != first
+    if next_paused:
+        curl._pause_mask = bit
+
+    assert late_with_id.go().result is False
+    assert isinstance(late_without_id.go().error, ValueError)
+    assert multi._pending_resume == {}
+    curl._pause_mask = bit
+    assert not _apply(multi)
+    assert curl._pause_mask == bit, "resume for the previous transfer cleared the next transfer's pause"
+
+    # The next transfer's own resume, by its own transfer_id, still works
+    assert _public_resume(curl, bit, curl.transfer_id) is True
+    assert _apply(multi)
+    assert curl._pause_mask == 0
     multi.remove(curl)
 
 
-def test_concurrent_resume_cannot_leak_into_reused_handle(multi, monkeypatch):
+@pytest.mark.parametrize("bit", [SEND, RECV], ids=["send", "recv"])
+def test_late_resume_between_transfers_is_discarded(multi, bit):
+    "A late resume landing after remove() or reset() but before the next add() is refused, not kept for it"
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    multi.add(curl)
+    first = curl.transfer_id
+    multi.remove(curl)
+    assert _public_resume(curl, bit, first) is False
+    assert _public_resume(curl, bit) is False
+    curl.reset("http://127.0.0.1:1/")
+    assert _public_resume(curl, bit, first) is False
+    assert _public_resume(curl, bit) is False
+    # Even a request already carrying the next transfer's id is not kept
+    # across add(): nothing can be paused before the transfer runs
+    assert _public_resume(curl, bit, curl.transfer_id) is False
+    assert multi._pending_resume == {}
+
+    multi.add(curl)
+    curl._pause_mask = bit
+    assert not _apply(multi)
+    assert curl._pause_mask == bit
+    multi.remove(curl)
+
+
+def test_queued_resume_does_not_leak_to_reused_handle(multi):
+    "Resumes queued for a transfer are dropped when it ends and cannot clear a pause on a reused Curl."
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    for ending in ("remove", "remove+reset", "stop+reset"):
+        multi.add(curl)
+        first = curl.transfer_id
+        if first == 0:
+            # A fresh Curl's first transfer is unambiguous without an id
+            assert multi.resume(curl, RECV) is True
+        assert multi.resume(curl, RECV, first) is True
+        assert multi._pending_resume == {curl.easyhash: (first, RECV)}
+        _end_transfer(multi, curl, ending)
+        assert multi._pending_resume == {}
+        assert curl.transfer_id > first
+
+        multi.add(curl)
+        curl._pause_mask = RECV
+        assert not _apply(multi)
+        assert curl._pause_mask == RECV
+        multi.remove(curl)
+
+
+def test_retry_within_do_keeps_transfer_id(multi):
+    "do() re-adding the same transfer for an auth retry keeps its transfer_id valid"
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    multi.add(curl)
+    transfer_id = curl.transfer_id
+    with multi._lock:
+        multi._remove_handle(curl)
+    # Between the legs nothing is paused, so the request is refused
+    assert curl.resume_upload(transfer_id) is False
+    multi.add(curl)
+    assert curl.transfer_id == transfer_id
+    curl._pause_mask = SEND
+    assert curl.resume_upload(transfer_id) is True
+    assert _apply(multi)
+    assert curl._pause_mask == 0
+    multi.remove(curl)
+    assert curl.resume_upload(transfer_id) is False
+
+
+@pytest.mark.parametrize("with_id", [False, True], ids=["without-id", "with-id"])
+def test_concurrent_resume_cannot_leak_into_reused_handle(multi, monkeypatch, with_id):
     """A resume() racing _add_handle() right at the point Tc241996d found unprotected
     (after the stale queue entry is dropped, before the reused handle is republished as
     active) must not survive to clear a pause the new transfer set for its own reason.
     """
     curl = mcurl.Curl("http://127.0.0.1:1/")
-    recv = mcurl.libcurl.CURLPAUSE_RECV
 
     multi.add(curl)
     multi.remove(curl)
     curl.reset("http://127.0.0.1:1/")
+    transfer_id = curl.transfer_id if with_id else None
 
     original_drop = mcurl.MCurl._drop_pending_resume
-    racer_completed = []
+    racer = []
 
-    def racing_drop(self, dropped_curl):
+    def racing_drop(self, dropped_curl, *args):
         # Runs inside _add_handle, exactly where the stale entry is dropped
-        # and before the handle is republished as active or its generation
-        # bumped - inject the delayed foreign-thread resume() right here.
-        original_drop(self, dropped_curl)
-        worker = threading.Thread(target=self.resume, args=(dropped_curl, recv))
-        worker.start()
-        worker.join(2)
-        racer_completed.append(not worker.is_alive())
+        # and before the handle is republished as active - inject the
+        # foreign-thread resume() right here.
+        original_drop(self, dropped_curl, *args)
+        racer.append(_LateCall(self.resume, dropped_curl, RECV, transfer_id).go())
 
     monkeypatch.setattr(mcurl.MCurl, "_drop_pending_resume", racing_drop)
     multi.add(curl)
+    monkeypatch.undo()
 
-    assert racer_completed == [True], "injected resume() from another thread did not complete"
+    assert len(racer) == 1 and racer[0].result is False and racer[0].error is None
 
     # The new transfer pauses receiving for its own, unrelated reason.
-    curl._pause_mask = recv
-    with multi._lock:
-        multi._apply_pending_resumes()
-    assert curl._pause_mask == recv, "stale resume from the previous transfer leaked into the reused handle"
+    curl._pause_mask = RECV
+    _apply(multi)
+    assert curl._pause_mask == RECV, "stale resume from the previous transfer leaked into the reused handle"
+    multi.remove(curl)
+
+
+class _SignallingSource(PausingSource):
+    "PausingSource that also sets an Event each time read() pauses"
+
+    def __init__(self, length):
+        super().__init__(length)
+        self.paused = threading.Event()
+
+    def read(self, size=-1):
+        data = super().read(size)
+        if data is None:
+            self.paused.set()
+        return data
+
+
+def test_reused_curl_streams_with_transfer_id(local_server, multi):
+    "Two paused uploads on one reset() Curl, each resumed by its own transfer_id; the first's is refused on the second"
+    addr = local_server(_EchoHandler)
+    curl = mcurl.Curl(_url(addr), method="POST")
+    ids = []
+    for _ in range(2):
+        source = _SignallingSource(4000)
+        curl.bridge(source, io.BytesIO(), None)
+        curl.set_headers({"Content-Length": "4000"})
+        ids.append(curl.transfer_id)
+        result: dict = {}
+        worker = threading.Thread(target=lambda result=result: result.update(ok=multi.do(curl)))
+        worker.start()
+        assert source.paused.wait(5), "upload never paused"
+        if len(ids) == 2:
+            assert curl.resume_upload(ids[0]) is False
+            with pytest.raises(ValueError):
+                curl.resume_upload()
+        source.release(4000)
+        assert curl.resume_upload(ids[-1]) is True
+        worker.join(5)
+        assert not worker.is_alive()
+        assert result.get("ok"), (curl.cerr, curl.resp, curl.errstr)
+        multi.remove(curl)
+        curl.reset(_url(addr), method="POST")
+    assert ids[0] != ids[1]
