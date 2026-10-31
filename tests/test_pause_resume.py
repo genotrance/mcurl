@@ -234,6 +234,35 @@ def test_resume_wakes_blocked_select():
         multi.close()
 
 
+def test_select_error_flushes_pending_completion(multi, monkeypatch):
+    """A stale Windows socket must not strand a partial sink's final suffix."""
+
+    class Sink:
+        def __init__(self):
+            self.data = bytearray()
+
+        def write(self, buf):
+            self.data += buf
+            return len(buf)
+
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    sink = Sink()
+    curl.client_wfile = sink
+    curl._wpending = b"final suffix"
+    curl._wdone = mcurl.libcurl.CURLE_OK
+    multi.handles[curl.easyhash] = curl
+    multi.rlist.add(123)
+
+    def select_error(*args):
+        raise OSError(10038, "not a socket")
+
+    monkeypatch.setattr(mcurl.select, "select", select_error)
+    multi._perform()
+    assert bytes(sink.data) == b"final suffix"
+    assert not curl._wpending
+    assert curl.done
+
+
 @pytest.mark.slow
 def test_stalled_uploader_does_not_delay_concurrent_transfers(local_server, multi):
     upload_addr = local_server(_EchoHandler)
