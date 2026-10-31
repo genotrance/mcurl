@@ -222,7 +222,7 @@ def test_resume_wakes_blocked_select():
         worker = threading.Thread(target=run)
         worker.start()
         time.sleep(0.1)
-        fake_curl = type("FakeCurl", (), {"easyhash": "does-not-exist"})()
+        fake_curl = type("FakeCurl", (), {"easyhash": "does-not-exist", "_generation": 0})()
         multi.resume(fake_curl)
         worker.join(2)
         assert elapsed, "background _perform() never returned"
@@ -463,23 +463,62 @@ def test_queued_resume_does_not_leak_to_reused_handle(multi):
         assert not worker.is_alive()
 
     multi.add(curl)
+    assert curl._generation == 1
     resume_from_thread()
-    assert multi._pending_resume == {curl.easyhash: recv}
+    assert multi._pending_resume == {curl.easyhash: (1, recv)}
 
     multi.remove(curl)
     assert multi._pending_resume == {}
 
     resume_from_thread()
-    assert multi._pending_resume == {curl.easyhash: recv}
+    assert multi._pending_resume == {curl.easyhash: (1, recv)}
     curl.reset("http://127.0.0.1:1/")
     assert multi._pending_resume == {}
 
     resume_from_thread()
-    assert multi._pending_resume == {curl.easyhash: recv}
+    assert multi._pending_resume == {curl.easyhash: (1, recv)}
     multi.add(curl)
+    assert curl._generation == 2
     assert multi._pending_resume == {}
     curl._pause_mask = recv
     with multi._lock:
         assert not multi._apply_pending_resumes()
     assert curl._pause_mask == recv
     multi.remove(curl)
+
+
+def test_concurrent_resume_cannot_leak_into_reused_handle(multi, monkeypatch):
+    """A resume() racing _add_handle() right at the point Tc241996d found unprotected
+    (after the stale queue entry is dropped, before the reused handle is republished as
+    active) must not survive to clear a pause the new transfer set for its own reason.
+    """
+    curl = mcurl.Curl("http://127.0.0.1:1/")
+    recv = mcurl.libcurl.CURLPAUSE_RECV
+
+    multi.add(curl)
+    multi.remove(curl)
+    curl.reset("http://127.0.0.1:1/")
+
+    original_drop = mcurl.MCurl._drop_pending_resume
+    racer_completed = []
+
+    def racing_drop(self, dropped_curl):
+        # Runs inside _add_handle, exactly where the stale entry is dropped
+        # and before the handle is republished as active or its generation
+        # bumped - inject the delayed foreign-thread resume() right here.
+        original_drop(self, dropped_curl)
+        worker = threading.Thread(target=self.resume, args=(dropped_curl, recv))
+        worker.start()
+        worker.join(2)
+        racer_completed.append(not worker.is_alive())
+
+    monkeypatch.setattr(mcurl.MCurl, "_drop_pending_resume", racing_drop)
+    multi.add(curl)
+
+    assert racer_completed == [True], "injected resume() from another thread did not complete"
+
+    # The new transfer pauses receiving for its own, unrelated reason.
+    curl._pause_mask = recv
+    with multi._lock:
+        multi._apply_pending_resumes()
+    assert curl._pause_mask == recv, "stale resume from the previous transfer leaked into the reused handle"
