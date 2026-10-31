@@ -175,12 +175,13 @@ candidate wheel in a dedicated directory and passes it as `MCURL_WHEELS` to
 px's `tests/scenarios/env/scenario-env.sh`. It runs `up`, `test` with the
 scenario pytest arguments, and an always-run `down`. The script starts the
 lab, then runs pytest and every Px process in its private-network `client`
-container, where it reinstalls pymcurl from that directory after `uv sync`.
-The gate checks that both the wheel filename and the imported pymcurl match
-the release's resolved version before running all px `scenario` tests,
-including upload scenarios through the NTLM and Negotiate/Kerberos Squid
-proxies. Ordinary pull requests do not need this run, but changes to proxy
-authentication, auth retry, or timeouts should be called out in the PR.
+container, where it installs exactly the `pymcurl==<version>` from that
+directory after `uv sync`. The gate checks that the sole wheel's filename
+version matches the release's resolved version before running all px
+`scenario` tests, so the client is guaranteed to run the candidate version.
+The tests include upload scenarios through the NTLM and Negotiate/Kerberos
+Squid proxies. Ordinary pull requests do not need this run, but changes to
+proxy authentication, auth retry, or timeouts should be called out in the PR.
 
 ### Local reproduction
 

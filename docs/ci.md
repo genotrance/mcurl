@@ -303,15 +303,17 @@ queued release re-checks the `main` SHA before it commits anything.
    always-run `down`) instead of invoking pytest directly: `up` builds and
    starts the lab, and `test` copies the single candidate wheel into a
    dedicated directory (`MCURL_WHEELS`), bind-mounts px's checkout into the
-   `client` container, reinstalls pymcurl there from the candidate wheel after
-   `uv sync`, and then runs the suite inside that container. The workflow
-   derives the expected version from the setup job, requires both the wheel
-   filename and the pymcurl imported by the scenario client to match it, and
-   then runs px's fix check and the suite. This confirms the candidate wheel,
-   not some other pymcurl, is what the scenarios exercised. On failure the job
-   uploads the compose logs and the lab's Px logs as the `px-scenario-logs`
-   artifact, collected via `scenario-env.sh logs` and `scenario-env.sh
-   artifacts`.
+   `client` container, installs exactly `pymcurl==<version>` from that wheel
+   there after `uv sync` (with `--reinstall-package`, so the lock's PyPI copy
+   is replaced), and then runs the suite inside that container. The version
+   chain is: the setup job's version must match the filename version of the
+   single selected wheel, and `scenario-env.sh` installs that wheel's version
+   in the client. Together these confirm the candidate wheel, not some other
+   pymcurl, is what the scenarios exercised. The workflow does not rewrite
+   px's `check.py` or scenario scripts, and no release version is hard-coded
+   in it. On failure the job uploads the compose logs and the lab's Px logs as
+   the `px-scenario-logs` artifact, collected via `scenario-env.sh logs` and
+   `scenario-env.sh artifacts`.
 5. **`publish`** — first verifies that the resolved release version matches
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
