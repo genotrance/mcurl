@@ -288,11 +288,17 @@ queued release re-checks the `main` SHA before it commits anything.
    failing on any mismatch).
 4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheels, explicitly
    selects the `manylinux` wheel (not `musllinux`), and runs px's Docker-backed
-   corporate proxy scenario suite against it inside px's `devel` checkout. The
-   job runs for every release and dry run; a failure prevents publication. The
-   job selects every `scenario`-marked test under px's `tests/scenarios`, so
-   new px scenarios (including the plain-HTTP upload scenarios) run in the
-   gate without workflow changes.
+   corporate proxy scenario suite against it. The job resolves px's latest
+   release tag at run time from the newest `v*` tag on `genotrance/px`
+   (`git ls-remote --tags --sort=-v:refname`, not `gh release view`, because
+   px's newest GitHub releases are flagged "Pre-release" even though they are
+   what ships to PyPI) and checks out exactly that tag, never px's `devel`
+   branch, so the gate answers whether this candidate breaks the px release
+   users actually run; it fails clearly if no tag resolves. The job runs for
+   every release and dry run with a 45-minute timeout; a failure prevents
+   publication. The job selects every `scenario`-marked test under px's
+   `tests/scenarios`, so new px scenarios (including the plain-HTTP upload
+   scenarios) run in the gate without workflow changes.
 
    px's scenario lab (`tests/scenarios/env/`) runs Squid, Samba and the origin
    server as Docker services on a private network, and since px devel commit
@@ -392,12 +398,13 @@ against px, which consumes pymcurl in production.
    run mcurl's full test suite against it. Ensure that the mcurl version built matches
    `pyproject.toml` exactly.
 3. Confirm the `px-scenarios` job passed in the `build.yml` dry run. It
-   installs the candidate Linux wheel into px's `devel` checkout and runs
-   px's Docker-backed corporate proxy scenarios, including HTTP and HTTPS
-   CONNECT proxy authentication. This automated gate replaced the manual px
-   suite run: any scenario failure blocks the release. The HTTPS proxy-auth
-   regression shipped in 8.23.0.1 was caught in px testing post-release; this
-   gate prevents that class of regression from reaching publication.
+   installs the candidate Linux wheel into a checkout of px's latest release
+   tag and runs px's Docker-backed corporate proxy scenarios, including HTTP
+   and HTTPS CONNECT proxy authentication. This automated gate replaced the
+   manual px suite run: any scenario failure blocks the release. The HTTPS
+   proxy-auth regression shipped in 8.23.0.1 was caught in px testing
+   post-release; this gate prevents that class of regression from reaching
+   publication.
 4. Download the dry-run artifacts
    (`gh run download <id> -R genotrance/mcurl -D dry-run`) and compare the
    wheel platform tags with the previous release on PyPI. Verify that `i686`,
