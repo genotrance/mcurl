@@ -398,12 +398,13 @@ against px, which consumes pymcurl in production.
    run mcurl's full test suite against it. Ensure that the mcurl version built matches
    `pyproject.toml` exactly.
 3. Confirm the `px-scenarios` job passed in the `build.yml` dry run. It
-   installs the candidate Linux wheel into px's `devel` checkout and runs
-   px's Docker-backed corporate proxy scenarios, including HTTP and HTTPS
-   CONNECT proxy authentication. This automated gate replaced the manual px
-   suite run: any scenario failure blocks the release. The HTTPS proxy-auth
-   regression shipped in 8.23.0.1 was caught in px testing post-release; this
-   gate prevents that class of regression from reaching publication.
+   installs the candidate Linux wheel into a checkout of px's latest release
+   tag and runs px's Docker-backed corporate proxy scenarios, including HTTP
+   and HTTPS CONNECT proxy authentication. This automated gate replaced the
+   manual px suite run: any scenario failure blocks the release. The HTTPS
+   proxy-auth regression shipped in 8.23.0.1 was caught in px testing
+   post-release; this gate prevents that class of regression from reaching
+   publication.
 4. Download the dry-run artifacts
    (`gh run download <id> -R genotrance/mcurl -D dry-run`) and compare the
    wheel platform tags with the previous release on PyPI. Verify that `i686`,
