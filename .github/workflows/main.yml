@@ -156,7 +156,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v4.3.4
+        uses: pypa/cibuildwheel@v4.3.5
         env:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: ${{ matrix.cibw_build }}
@@ -183,7 +183,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (Linux ${{ matrix.arch }})
-        uses: pypa/cibuildwheel@v4.3.4
+        uses: pypa/cibuildwheel@v4.3.5
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.cibw_build }}
@@ -208,7 +208,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Build and test wheels (musllinux ${{ matrix.arch }})
-        uses: pypa/cibuildwheel@v4.3.4
+        uses: pypa/cibuildwheel@v4.3.5
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.cibw_build }}
