@@ -150,12 +150,29 @@ jobs:
     if: needs.setup.outputs.dry_run == 'true' || (needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main')
     needs: [setup, build-wheels]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
+      - name: Resolve latest px release tag
+        id: px-tag
+        run: |
+          # px marks its newest GitHub releases "Pre-release" even though
+          # they are what ships to PyPI and what users install, so `gh
+          # release view` (latest non-prerelease) would resolve a stale
+          # version here; the newest v* tag is the actual latest release.
+          TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/genotrance/px.git 'v*' \
+            | head -n1 | sed 's#.*refs/tags/##')
+          if [ -z "$TAG" ]; then
+            echo "Could not resolve the latest px release tag" >&2
+            exit 1
+          fi
+          echo "Testing against px release $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Check out px scenario suite
         uses: actions/checkout@v7
         with:
           repository: genotrance/px
-          ref: devel
+          ref: ${{ steps.px-tag.outputs.tag }}
           path: px
 
       - name: Download Linux candidate wheel

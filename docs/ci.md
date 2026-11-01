@@ -288,11 +288,17 @@ queued release re-checks the `main` SHA before it commits anything.
    failing on any mismatch).
 4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheels, explicitly
    selects the `manylinux` wheel (not `musllinux`), and runs px's Docker-backed
-   corporate proxy scenario suite against it inside px's `devel` checkout. The
-   job runs for every release and dry run; a failure prevents publication. The
-   job selects every `scenario`-marked test under px's `tests/scenarios`, so
-   new px scenarios (including the plain-HTTP upload scenarios) run in the
-   gate without workflow changes.
+   corporate proxy scenario suite against it. The job resolves px's latest
+   release tag at run time from the newest `v*` tag on `genotrance/px`
+   (`git ls-remote --tags --sort=-v:refname`, not `gh release view`, because
+   px's newest GitHub releases are flagged "Pre-release" even though they are
+   what ships to PyPI) and checks out exactly that tag, never px's `devel`
+   branch, so the gate answers whether this candidate breaks the px release
+   users actually run; it fails clearly if no tag resolves. The job runs for
+   every release and dry run with a 45-minute timeout; a failure prevents
+   publication. The job selects every `scenario`-marked test under px's
+   `tests/scenarios`, so new px scenarios (including the plain-HTTP upload
+   scenarios) run in the gate without workflow changes.
 
    px's scenario lab (`tests/scenarios/env/`) runs Squid, Samba and the origin
    server as Docker services on a private network, and since px devel commit
