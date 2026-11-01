@@ -286,19 +286,28 @@ queued release re-checks the `main` SHA before it commits anything.
    macOS runs `tools/brew_curl.sh` before compilation so its wheel uses the
    release's declared libcurl version (upgrading curl only when needed and
    failing on any mismatch).
-4. **`px-scenarios`** — downloads the x86_64 Linux candidate wheels, explicitly
-   selects the `manylinux` wheel (not `musllinux`), and runs px's Docker-backed
-   corporate proxy scenario suite against it. The job resolves px's latest
-   release tag at run time from the newest `v*` tag on `genotrance/px`
+4. **`build-wheel-linux-x86_64`** — builds the Linux x86_64 wheel on its own
+   (same cibuildwheel settings, same `wheels-ubuntu-latest-x86_64` artifact),
+   outside the `build-wheels` matrix, so `px-scenarios` can start as soon as
+   this one wheel exists instead of waiting on the slower aarch64/macOS jobs.
+5. **`px-scenarios`** — downloads the `build-wheel-linux-x86_64` candidate
+   wheel, explicitly selects the `manylinux` wheel (not `musllinux`), and runs
+   a curated, mcurl-focused subset of px's Docker-backed corporate proxy
+   scenario suite against it. The job resolves px's latest release tag at run
+   time from the newest `v*` tag on `genotrance/px`
    (`git ls-remote --tags --sort=-v:refname`, not `gh release view`, because
    px's newest GitHub releases are flagged "Pre-release" even though they are
    what ships to PyPI) and checks out exactly that tag, never px's `devel`
    branch, so the gate answers whether this candidate breaks the px release
    users actually run; it fails clearly if no tag resolves. The job runs for
-   every release and dry run with a 45-minute timeout; a failure prevents
-   publication. The job selects every `scenario`-marked test under px's
-   `tests/scenarios`, so new px scenarios (including the plain-HTTP upload
-   scenarios) run in the gate without workflow changes.
+   every release and dry run with a 15-minute timeout; a failure prevents
+   publication. Rather than px's full lab matrix, it selects by pytest node ID
+   only the cases that exercise mcurl's own auth and upload code paths —
+   NTLM/Negotiate/Kerberos/Basic/Digest credential and 407 flows, a Kerberos
+   ticket-cache run, the Negotiate SPN regression, streamed uploads on a fresh
+   and a warm Px across every auth scheme (small bodies), and one CONNECT
+   case — and sets `PX_EVENT_LOOP=auto` so upload cases run on Px's default
+   event loop only, not both.
 
    px's scenario lab (`tests/scenarios/env/`) runs Squid, Samba and the origin
    server as Docker services on a private network, and since px devel commit
@@ -320,7 +329,7 @@ queued release re-checks the `main` SHA before it commits anything.
    in it. On failure the job uploads the compose logs and the lab's Px logs as
    the `px-scenario-logs` artifact, collected via `scenario-env.sh logs` and
    `scenario-env.sh artifacts`.
-5. **`publish`** — first verifies that the resolved release version matches
+6. **`publish`** — first verifies that the resolved release version matches
    `pyproject.toml` at the release commit (the `sha` input when given,
    otherwise the triggering commit) and that every artifact carries that
    version, so a tag can never point at a commit declaring a different

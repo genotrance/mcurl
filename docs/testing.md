@@ -169,23 +169,27 @@ the wheel bundles them.
 **Testing px's corporate proxy scenarios against the exact candidate.** mcurl's
 own suite does not catch everything a consumer depends on. px's HTTPS
 proxy-auth tests caught a regression in 8.23.0.1 that mcurl's suite did not.
-`build.yml` now makes px's Docker-backed corporate proxy scenario suite a
-release gate in every release and dry run, with a 45-minute job timeout. The
-job resolves px's latest release tag at run time and checks out exactly that
-tag (never px's `devel` branch), so the gate tests against the px release
-users actually run, and fails clearly if no tag resolves. It puts only the
-Linux candidate wheel in a dedicated directory and passes it as
-`MCURL_WHEELS` to px's `tests/scenarios/env/scenario-env.sh`. It runs `up`,
-`test` with the scenario pytest arguments, and an always-run `down`. The
-script starts the lab, then runs pytest and every Px process in its
-private-network `client` container, where it installs exactly the
-`pymcurl==<version>` from that directory after `uv sync`. The gate checks
-that the sole wheel's filename version matches the release's resolved
-version before running all px `scenario` tests, so the client is guaranteed
-to run the candidate version.
-The tests include upload scenarios through the NTLM and Negotiate/Kerberos
-Squid proxies. Ordinary pull requests do not need this run, but changes to
-proxy authentication, auth retry, or timeouts should be called out in the PR.
+`build.yml` now makes a curated, mcurl-focused subset of px's Docker-backed
+corporate proxy scenario suite a release gate in every release and dry run,
+with a 15-minute job timeout, fed by a dedicated job that builds only the
+Linux x86_64 wheel so the gate can start without waiting on the other wheel
+platforms. The job resolves px's latest release tag at run time and checks
+out exactly that tag (never px's `devel` branch), so the gate tests against
+the px release users actually run, and fails clearly if no tag resolves. It
+puts only the Linux candidate wheel in a dedicated directory and passes it
+as `MCURL_WHEELS` to px's `tests/scenarios/env/scenario-env.sh`. It runs
+`up`, `test` with explicit pytest node IDs selecting only the cases that
+exercise mcurl's auth and upload paths (NTLM/Negotiate/Kerberos/Basic/Digest
+credential and 407 flows, streamed uploads on a fresh and a warm Px, and one
+CONNECT case) with `PX_EVENT_LOOP=auto` pinning a single event loop, and an
+always-run `down`. The script starts the lab, then runs pytest and every Px
+process in its private-network `client` container, where it installs
+exactly the `pymcurl==<version>` from that directory after `uv sync`. The
+gate checks that the sole wheel's filename version matches the release's
+resolved version before running the selected tests, so the client is
+guaranteed to run the candidate version.
+Ordinary pull requests do not need this run, but changes to proxy
+authentication, auth retry, or timeouts should be called out in the PR.
 
 ### Local reproduction
 
@@ -194,7 +198,7 @@ proxy authentication, auth retry, or timeouts should be called out in the PR.
 | Fast push/PR lane | `make test-fast` (run `eval $(make env)` first on Linux so the test-time `LD_LIBRARY_PATH` points at the jbb libcurl) |
 | Full lane | `make test`, or `uv run python -m pytest tests -q` |
 | Wheel smoke (on an installed wheel) | Build with `uv build`, install the wheel into a fresh virtual environment with `pytest` and `pytest-httpbin`, then run `python -m pytest <checkout>/tests -m smoke -q -rs --import-mode=importlib` from a directory outside the checkout |
-| px corporate proxy scenarios (release gate) | In a checkout of px's latest release tag (not `devel`) with Docker available, put only the candidate wheel in `/tmp/mcurl-candidate-wheel`, then run `tests/scenarios/env/scenario-env.sh up`, `MCURL_WHEELS=/tmp/mcurl-candidate-wheel tests/scenarios/env/scenario-env.sh test tests/scenarios -m scenario -v`, and `tests/scenarios/env/scenario-env.sh down` (run `down` even if `test` fails). |
+| px corporate proxy scenarios (release gate) | In a checkout of px's latest release tag (not `devel`) with Docker available, put only the candidate wheel in `/tmp/mcurl-candidate-wheel`, then run `tests/scenarios/env/scenario-env.sh up`, `MCURL_WHEELS=/tmp/mcurl-candidate-wheel PX_EVENT_LOOP=auto tests/scenarios/env/scenario-env.sh test tests/scenarios/test_corporate_proxy.py::test_px_test_credentials tests/scenarios/test_corporate_proxy.py::test_kerberos_ticket_no_password tests/scenarios/test_corporate_proxy.py::test_px_test_auth_negotiate_matches_upstream_spn "tests/scenarios/test_corporate_proxy.py::test_proxy_chain[https-connect]" tests/scenarios/test_corporate_proxy.py::test_upload_first_request tests/scenarios/test_corporate_proxy.py::test_upload_later_requests -v`, and `tests/scenarios/env/scenario-env.sh down` (run `down` even if `test` fails). |
 
 `make test-smoke` runs the smoke selection against the editable development
 environment. It does not test an installed wheel, which is what cibuildwheel
