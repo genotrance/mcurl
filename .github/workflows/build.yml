@@ -101,9 +101,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            arch: x86_64
-            cibw_archs: x86_64
-          - os: ubuntu-latest
             arch: i686
             cibw_archs: i686
           - os: ubuntu-24.04-arm
@@ -144,13 +141,43 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
+  build-wheel-linux-x86_64:
+    # Its own job (not part of the build-wheels matrix) so px-scenarios can
+    # start as soon as this one wheel exists instead of waiting on the full
+    # matrix (aarch64 and macOS runners are consistently the slowest).
+    needs: setup
+    name: Build ubuntu-latest x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set version
+        shell: bash
+        run: |
+          sed -i.bak "s/^version = \".*\"/version = \"${{ needs.setup.outputs.version }}\"/" pyproject.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.3.4
+        env:
+          CIBW_ARCHS: x86_64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-ubuntu-latest-x86_64
+          path: wheelhouse/*.whl
+
   px-scenarios:
     # A dry run is a release rehearsal, so it runs the same consumer regression
     # gate. Normal devel dispatches do not need the Docker scenario environment.
     if: needs.setup.outputs.dry_run == 'true' || (needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main')
-    needs: [setup, build-wheels]
+    needs: [setup, build-wheel-linux-x86_64]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - name: Resolve latest px release tag
         id: px-tag
@@ -214,13 +241,31 @@ jobs:
       # after uv sync. The "Select the candidate wheel" step above checks that
       # the sole wheel's filename version matches the setup job's version, so
       # the client runs the candidate version.
+      #
+      # This runs only the cases that exercise mcurl's own auth and upload
+      # code paths, not px's full lab matrix (burst/load, 100mb, two-workers,
+      # RSS, all-methods-echo, authretry/lockout timing, PAC, connection
+      # limits, long-lived tunnels): NTLM/Negotiate/Kerberos/Basic/Digest
+      # credential and 407 flows, a Kerberos ticket-cache run, the Negotiate
+      # SPN regression, streamed uploads on a fresh and on a warm Px across
+      # every auth scheme (small bodies only), and one CONNECT case. px's
+      # UPLOAD_LOOPS collapses to a single event loop when PX_EVENT_LOOP is
+      # set, so this also runs each upload case once (with "auto", Px's own
+      # default) instead of twice.
       - name: Run px corporate proxy scenarios
         working-directory: px
         env:
           MCURL_WHEELS: ${{ runner.temp }}/mcurl-candidate-wheel
+          PX_EVENT_LOOP: auto
         run: |
-          tests/scenarios/env/scenario-env.sh test tests/scenarios -m scenario -v --durations=30 \
-            --basetemp=/tmp/px-scenario-tmp
+          tests/scenarios/env/scenario-env.sh test \
+            tests/scenarios/test_corporate_proxy.py::test_px_test_credentials \
+            tests/scenarios/test_corporate_proxy.py::test_kerberos_ticket_no_password \
+            tests/scenarios/test_corporate_proxy.py::test_px_test_auth_negotiate_matches_upstream_spn \
+            "tests/scenarios/test_corporate_proxy.py::test_proxy_chain[https-connect]" \
+            tests/scenarios/test_corporate_proxy.py::test_upload_first_request \
+            tests/scenarios/test_corporate_proxy.py::test_upload_later_requests \
+            -v --durations=30 --basetemp=/tmp/px-scenario-tmp
 
       - name: Collect px scenario logs
         if: failure()
@@ -244,7 +289,7 @@ jobs:
         run: tests/scenarios/env/scenario-env.sh down
 
   publish:
-    needs: [setup, build-sdist, build-wheels, px-scenarios]
+    needs: [setup, build-sdist, build-wheels, build-wheel-linux-x86_64, px-scenarios]
     if: needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main' && needs.px-scenarios.result == 'success'
     runs-on: ubuntu-latest
     permissions:
