@@ -10,20 +10,18 @@ from pathlib import Path
 
 # px uses these for proxy authentication, TLS, proxying, name handling, and
 # HTTP/2. A removal needs review before a devel-to-main release merge.
-PX_REQUIRED_FEATURES = frozenset(
-    {
-        "NTLM",
-        "SPNEGO",
-        "GSS-API",
-        "Kerberos",
-        "SSPI",
-        "SSL",
-        "HTTPS-proxy",
-        "Unicode",
-        "AsynchDNS",
-        "HTTP2",
-    }
-)
+PX_REQUIRED_FEATURES = frozenset({
+    "NTLM",
+    "SPNEGO",
+    "GSS-API",
+    "Kerberos",
+    "SSPI",
+    "SSL",
+    "HTTPS-proxy",
+    "Unicode",
+    "AsynchDNS",
+    "HTTP2",
+})
 
 
 @dataclass(frozen=True)
@@ -79,14 +77,12 @@ def render_markdown(changes: Iterable[PlatformFeatureChange]) -> str:
         lines.append("Could not compare: the two releases have no matching platform triplets.")
     else:
         for change in changes:
-            lines.extend(
-                [
-                    f"### `{change.triplet}`",
-                    f"- Removed: {', '.join(change.removed) if change.removed else 'none'}",
-                    f"- Added: {', '.join(change.added) if change.added else 'none'}",
-                    "",
-                ]
-            )
+            lines.extend([
+                f"### `{change.triplet}`",
+                f"- Removed: {', '.join(change.removed) if change.removed else 'none'}",
+                f"- Added: {', '.join(change.added) if change.added else 'none'}",
+                "",
+            ])
     sections.append("\n".join(lines).rstrip())
     return "\n\n".join(sections)
 
@@ -114,10 +110,7 @@ def main() -> None:
     if args.warnings:
         for change in changes:
             if change.px_relevant_removed:
-                print(
-                    f"px-relevant features removed on {change.triplet}: "
-                    + ", ".join(change.px_relevant_removed)
-                )
+                print(f"px-relevant features removed on {change.triplet}: " + ", ".join(change.px_relevant_removed))
     else:
         print(render_markdown(changes))
 
