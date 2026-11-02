@@ -8,14 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Log the release plan without changing GitHub or PyPI"
+        description: "Log the upstream-update plan without changing GitHub"
         required: false
         default: false
         type: boolean
 
-# This also serializes against build.yml releases from a manual main push.
 concurrency:
-  group: ${{ inputs.dry_run && format('check-upstream-dry-run-{0}', github.run_id) || 'release-main' }}
+  group: ${{ inputs.dry_run && format('check-upstream-dry-run-{0}', github.run_id) || 'check-upstream' }}
   cancel-in-progress: false
 
 jobs:
@@ -24,24 +23,27 @@ jobs:
     permissions:
       contents: read
     outputs:
-      head_sha: ${{ steps.target.outputs.head_sha }}
-      version: ${{ steps.target.outputs.version }}
-      bump: ${{ steps.target.outputs.bump }}
-      release_needed: ${{ steps.target.outputs.release_needed }}
-      dry_run: ${{ steps.target.outputs.dry_run }}
+      branch: ${{ steps.plan.outputs.branch }}
+      current: ${{ steps.plan.outputs.current }}
+      devel_sha: ${{ steps.plan.outputs.devel_sha }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      proposal_needed: ${{ steps.plan.outputs.proposal_needed }}
+      title: ${{ steps.plan.outputs.title }}
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      version: ${{ steps.plan.outputs.target }}
+      body: ${{ steps.plan.outputs.body }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: devel
           fetch-depth: 0
 
-      - name: Get latest upstream version
+      - name: Get latest upstream release
         id: upstream
         run: |
           API_RESPONSE=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
             "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/latest")
           LATEST_RELEASE=$(python3 -c "import json, sys; print(json.load(sys.stdin).get('tag_name', ''))" <<< "$API_RESPONSE")
-
           if ! [[ "$LATEST_RELEASE" =~ ^LibCURL-v[0-9]+\.[0-9]+\.[0-9]+\+.+$ ]]; then
             echo "::error::Could not obtain a valid LibCURL_jll release tag: ${LATEST_RELEASE:-<empty>}"
             exit 1
@@ -49,47 +51,134 @@ jobs:
           echo "tag=$LATEST_RELEASE" >> "$GITHUB_OUTPUT"
           echo "Latest upstream release: $LATEST_RELEASE"
 
-      - name: Decide target version
-        id: target
+      - name: Plan the upstream update
+        id: plan
         env:
-          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
         run: |
-          CURRENT_VER=$(python3 -c "import re, pathlib; print(re.search(r'^version = \"(.+?)\"', pathlib.Path('pyproject.toml').read_text(), re.M).group(1))")
-          TARGET=$(python3 tools/release_decision.py \
-            --current "$CURRENT_VER" --upstream-tag "$UPSTREAM_TAG" --tag-exists false | sed -n 's/^target=//p')
-          if git rev-parse -q --verify "refs/tags/v$TARGET" >/dev/null; then
-            TAG_EXISTS=true
+          set -euo pipefail
+          CURRENT=$(python3 -c "import re, pathlib; print(re.search(r'^version = \"(.+?)\"', pathlib.Path('pyproject.toml').read_text(), re.M).group(1))")
+          CURRENT_BASE=${CURRENT%.*}
+          DECISION=$(mktemp)
+          python3 tools/release_decision.py --current "$CURRENT" --upstream-tag "$UPSTREAM_TAG" > "$DECISION"
+          TARGET=$(sed -n 's/^target=//p' "$DECISION")
+          BASE=$(sed -n 's/^base=//p' "$DECISION")
+          PROPOSAL_NEEDED=$(sed -n 's/^proposal_needed=//p' "$DECISION")
+          BRANCH="upstream/libcurl-v$BASE"
+          TITLE="Update libcurl to v$BASE (version $TARGET)"
+          BODY=$(mktemp)
+
+          if [ "$PROPOSAL_NEEDED" = true ]; then
+            BEFORE_TAG=$(git ls-remote --tags --refs https://github.com/genotrance/LibCURL_jll.jl \
+              "LibCURL-v${CURRENT_BASE}+*" | sed 's#.*refs/tags/##' | sort -V | tail -1)
+            if [ -z "$BEFORE_TAG" ]; then
+              COMPARISON="## Libcurl feature comparison
+
+          Could not compare: no released LibCURL_jll tag matches the current libcurl base v${CURRENT_BASE}."
+            else
+              FEATURES_DIR=$(mktemp -d)
+              trap 'rm -rf "$FEATURES_DIR"' EXIT
+              collect_features() {
+                local tag=$1 output=$2 release_json asset_list asset name url triplet extracted config features
+                release_json="$FEATURES_DIR/release.json"
+                asset_list="$FEATURES_DIR/assets.tsv"
+                curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+                  "https://api.github.com/repos/genotrance/LibCURL_jll.jl/releases/tags/${tag//+/%2B}" \
+                  -o "$release_json"
+                python3 - "$release_json" > "$asset_list" <<'PY'
+          import json
+          import re
+          import sys
+
+          for asset in json.load(open(sys.argv[1]))["assets"]:
+              name = asset["name"]
+              if re.fullmatch(r"LibCURL\.v\d+\.\d+\.\d+\..+\.tar\.gz", name):
+                  print(f"{name}\t{asset['browser_download_url']}")
+          PY
+                : > "$output"
+                while IFS=$'\t' read -r name url; do
+                  triplet=${name#LibCURL.v}
+                  triplet=${triplet#*.*.*.}
+                  triplet=${triplet%.tar.gz}
+                  asset="$FEATURES_DIR/$name"
+                  extracted="$FEATURES_DIR/${tag}-${triplet}"
+                  if ! curl --fail --silent --show-error --location --retry 3 --retry-all-errors "$url" -o "$asset" \
+                    || ! mkdir -p "$extracted" \
+                    || ! tar -xzf "$asset" -C "$extracted"; then
+                    echo "::warning::Could not inspect curl features for $tag on $triplet."
+                    continue
+                  fi
+                  config="$extracted/bin/curl-config"
+                  if [ ! -f "$config" ] || ! features=$(sh "$config" --features); then
+                    echo "::warning::Could not run curl-config --features for $tag on $triplet."
+                    continue
+                  fi
+                  printf '%s\t%s\n' "$triplet" "$(tr '\n' ' ' <<< "$features")" >> "$output"
+                done < "$asset_list"
+              }
+
+              if collect_features "$BEFORE_TAG" "$FEATURES_DIR/before.txt" \
+                && collect_features "$UPSTREAM_TAG" "$FEATURES_DIR/after.txt"; then
+                COMPARISON=$(python3 tools/libcurl_features.py \
+                  --before-file "$FEATURES_DIR/before.txt" --after-file "$FEATURES_DIR/after.txt")
+                while IFS= read -r warning; do
+                  [ -z "$warning" ] || echo "::warning::$warning"
+                done < <(python3 tools/libcurl_features.py \
+                  --before-file "$FEATURES_DIR/before.txt" --after-file "$FEATURES_DIR/after.txt" --warnings)
+              else
+                COMPARISON="## Libcurl feature comparison
+
+          Could not compare: downloading or reading released LibCURL_jll curl-config files failed."
+              fi
+            fi
+
+            {
+              printf '%s\n\n' "$COMPARISON"
+              cat <<EOF_BODY
+          ## Automated libcurl update
+
+          - [LibCURL_jll release notes](https://github.com/genotrance/LibCURL_jll.jl/releases/tag/$UPSTREAM_TAG)
+          - [curl $BASE changes](https://curl.se/ch/$BASE.html)
+
+          Full CI and a \`build.yml\` dry run were dispatched for this branch. Releasing needs a reviewed \`devel\` -> \`main\` merge.
+          EOF_BODY
+            } > "$BODY"
           else
-            TAG_EXISTS=false
+            printf '%s\n' "No PR is needed: devel already uses libcurl v$BASE." > "$BODY"
           fi
 
-          python3 tools/release_decision.py \
-            --current "$CURRENT_VER" --upstream-tag "$UPSTREAM_TAG" --tag-exists "$TAG_EXISTS" >> "$GITHUB_OUTPUT"
-          HEAD_SHA=$(git rev-parse HEAD)
           {
-            echo "head_sha=$HEAD_SHA"
-            echo "version=$TARGET"
+            cat "$DECISION"
+            echo "current=$CURRENT"
+            echo "devel_sha=$(git rev-parse HEAD)"
             echo "dry_run=$DRY_RUN"
+            echo "upstream_tag=$UPSTREAM_TAG"
+            echo "branch=$BRANCH"
+            echo "title=$TITLE"
+            echo "body<<EOF_BODY"
+            cat "$BODY"
+            echo "EOF_BODY"
           } >> "$GITHUB_OUTPUT"
 
-          echo "upstream=$UPSTREAM_TAG pyproject=$CURRENT_VER target=$TARGET tag_exists=$TAG_EXISTS"
+          echo "upstream=$UPSTREAM_TAG current=$CURRENT target=$TARGET branch=$BRANCH proposal_needed=$PROPOSAL_NEEDED"
           if [ "$DRY_RUN" = true ]; then
-            echo "::notice::Dry run: release_needed and bump above are a plan only."
-            if [ "$CURRENT_VER" != "$TARGET" ]; then
-              echo "::notice::Dry run: would commit pyproject.toml and docs/changelog.md on main."
-              echo "::notice::Dry run: build SHA would be the new bump commit with parent $HEAD_SHA."
-            elif [ "$TAG_EXISTS" = false ]; then
-              echo "::notice::Dry run: would build exact existing main SHA $HEAD_SHA."
+            if [ "$PROPOSAL_NEEDED" = true ]; then
+              echo "::notice::Dry-run plan: would open \"$TITLE\" on $BRANCH against devel."
+              echo "::notice::Dry-run plan: would dispatch main.yml with full=true and build.yml with dry_run=true."
+              echo "::group::Dry-run pull request body"
+              cat "$BODY"
+              echo "::endgroup::"
             else
-              echo "::notice::Dry run: no commit or build would be needed."
+              echo "::notice::Dry-run plan: no pull request or workflow dispatch is needed."
             fi
           fi
 
   macos-ready:
     needs: check
-    if: needs.check.outputs.release_needed == 'true'
+    if: needs.check.outputs.proposal_needed == 'true'
     runs-on: macos-15
+    permissions: {}
     outputs:
       ready: ${{ steps.curl.outputs.ready }}
     steps:
@@ -97,73 +186,102 @@ jobs:
         id: curl
         env:
           EXPECTED: ${{ needs.check.outputs.version }}
+          DRY_RUN: ${{ needs.check.outputs.dry_run }}
         run: |
           EXPECTED_BASE=${EXPECTED%.*}
           if ! brew update; then
-            echo "::warning::Homebrew update failed; defer this release until next week."
+            echo "::warning::Homebrew update failed; defer the upstream PR until next week."
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           brew upgrade curl || true
           if ! INSTALLED=$("$(brew --prefix curl)/bin/curl" --version | sed -n '1s/curl \([^ ]*\).*/\1/p'); then
-            echo "::warning::Homebrew curl is unavailable; defer this release until next week."
+            echo "::warning::Homebrew curl is unavailable; defer the upstream PR until next week."
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$INSTALLED" != "$EXPECTED_BASE" ]; then
-            echo "::warning::Homebrew curl is $INSTALLED, waiting for $EXPECTED_BASE before releasing."
+            echo "::warning::Homebrew curl is $INSTALLED, waiting for $EXPECTED_BASE before opening the upstream PR."
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "ready=true" >> "$GITHUB_OUTPUT"
           echo "Homebrew curl $INSTALLED is ready for $EXPECTED."
+          if [ "$DRY_RUN" = true ]; then
+            echo "::notice::Dry run: Homebrew readiness was checked, but no PR will be opened."
+          fi
 
-  prepare-and-dispatch:
+  prepare-update:
     needs: [check, macos-ready]
-    if: needs.check.outputs.release_needed == 'true' && needs.macos-ready.outputs.ready == 'true'
+    if: needs.check.outputs.proposal_needed == 'true' && needs.macos-ready.outputs.ready == 'true'
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: write
+      pull-requests: read
+    outputs:
+      created: ${{ steps.prepare.outputs.created }}
+      branch: ${{ steps.prepare.outputs.branch }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: devel
           fetch-depth: 0
 
-      - name: Prepare committed release version
+      - name: Create the upstream update branch
         id: prepare
         env:
-          CHECKED_MAIN_SHA: ${{ needs.check.outputs.head_sha }}
-          VERSION: ${{ needs.check.outputs.version }}
-          BUMP: ${{ needs.check.outputs.bump }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+          CHECKED_DEVEL_SHA: ${{ needs.check.outputs.devel_sha }}
           DRY_RUN: ${{ needs.check.outputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ needs.check.outputs.title }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
-          git fetch origin main
-          if [ "$(git rev-parse origin/main)" != "$CHECKED_MAIN_SHA" ]; then
-            echo "::error::main changed after the release decision; retry so the version plan is recalculated."
-            exit 1
-          fi
-          git checkout --detach "$CHECKED_MAIN_SHA"
+          set -euo pipefail
+          echo "created=false" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-          if [ "$BUMP" = false ]; then
-            echo "sha=$CHECKED_MAIN_SHA" >> "$GITHUB_OUTPUT"
-            echo "Building existing main commit $CHECKED_MAIN_SHA."
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            echo "Branch $BRANCH already exists; no update created."
+            exit 0
+          fi
+          if [ "$(gh pr list --repo "$GITHUB_REPOSITORY" --base devel --head "$BRANCH" --state open --json number --jq 'length')" != 0 ]; then
+            echo "An open pull request already uses $BRANCH; no update created."
             exit 0
           fi
 
           if [ "$DRY_RUN" = true ]; then
-            echo "::notice::Dry run: would commit libcurl version $VERSION to main."
-            echo "::notice::Dry run: would dispatch the resulting bump commit."
+            echo "::notice::Dry run: would create $BRANCH from devel, commit version $VERSION, push it, and open \"$TITLE\"."
+            echo "::notice::Dry run: would dispatch main.yml (full=true) and build.yml (dry_run=true) on $BRANCH."
             exit 0
           fi
 
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
-          python3 - <<'EOF'
+          git fetch origin devel
+          if [ "$(git rev-parse origin/devel)" != "$CHECKED_DEVEL_SHA" ]; then
+            echo "::warning::devel changed after the release decision; retry so the version plan is recalculated."
+            exit 0
+          fi
+          git checkout -b "$BRANCH" "$CHECKED_DEVEL_SHA"
+          python3 - <<'PY'
           import os
           import pathlib
+          import re
 
           version = os.environ["VERSION"]
+          pyproject = pathlib.Path("pyproject.toml")
+          pyproject.write_text(re.sub(r'(?m)^version = ".*"$', f'version = "{version}"', pyproject.read_text(), count=1))
+
+          lock = pathlib.Path("uv.lock")
+          lock_text = lock.read_text()
+          lock_text, replacements = re.subn(
+              r'(?m)(\[\[package\]\]\nname = "pymcurl"\nversion = ")[^"]+(")',
+              rf"\g<1>{version}\g<2>",
+              lock_text,
+              count=1,
+          )
+          if replacements:
+              lock.write_text(lock_text)
+
           base = version.rsplit(".", 1)[0]
           changelog = pathlib.Path("docs/changelog.md")
           text = changelog.read_text()
@@ -171,40 +289,67 @@ jobs:
               entry = f"\n## v{version} — TBD\n\n- Updated to libcurl v{base}.\n\n---\n"
               head, separator, rest = text.partition("---\n")
               changelog.write_text(head + separator + entry + rest)
-          EOF
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "Update to libcurl ${VERSION%.*}"
-          git push origin HEAD:main
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Fast-forward devel to the bump
-        if: needs.check.outputs.bump == 'true' && needs.check.outputs.dry_run != 'true'
-        env:
-          RELEASE_SHA: ${{ steps.prepare.outputs.sha }}
-        run: |
-          git fetch origin devel
-          if ! git merge-base --is-ancestor origin/devel "$RELEASE_SHA"; then
-            echo "::warning::devel has diverged from main; leaving it unchanged. Merge main into devel manually."
+          PY
+          git add pyproject.toml uv.lock docs/changelog.md
+          if git diff --cached --quiet; then
+            echo "devel already contains libcurl version $VERSION; no update created."
             exit 0
           fi
-          if ! git push origin "$RELEASE_SHA:devel"; then
-            echo "::warning::Could not fast-forward devel; leaving it unchanged. Merge main into devel manually."
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update to libcurl ${VERSION%.*}"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "created=true" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger build at committed SHA
-        if: needs.check.outputs.dry_run != 'true'
+  open-pull-request:
+    needs: [check, prepare-update]
+    if: needs.prepare-update.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Open the upstream update pull request
         uses: actions/github-script@v9
         env:
-          SHA: ${{ steps.prepare.outputs.sha }}
+          BODY: ${{ needs.check.outputs.body }}
+          BRANCH: ${{ needs.prepare-update.outputs.branch }}
+          TITLE: ${{ needs.check.outputs.title }}
         with:
           script: |
-            const sha = process.env.SHA;
-            core.info(`Dispatching build.yml for ${sha}`);
+            await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: process.env.TITLE,
+              head: process.env.BRANCH,
+              base: 'devel',
+              body: process.env.BODY,
+            });
+
+  trigger-ci:
+    needs: [prepare-update, open-pull-request]
+    if: needs.prepare-update.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger CI and a release dry run on the pull request branch
+        uses: actions/github-script@v9
+        env:
+          BRANCH: ${{ needs.prepare-update.outputs.branch }}
+        with:
+          script: |
+            // GITHUB_TOKEN pushes and PRs do not trigger these workflows.
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'main.yml',
+              ref: process.env.BRANCH,
+              inputs: { full: 'true' },
+            });
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'build.yml',
-              ref: 'main',
-              inputs: { sha, dry_run: 'false' },
+              ref: process.env.BRANCH,
+              inputs: { dry_run: 'true' },
             });
