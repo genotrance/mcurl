@@ -163,10 +163,11 @@ e.g. `8.19.0.1`. The first three components track the upstream libcurl version;
 the fourth is incremented for mcurl-specific releases against the same libcurl.
 
 The committed `pyproject.toml` version is the release version: when libcurl
-moves, `check-upstream.yml` proposes the bump on `devel`, where CI and a build
-dry run complete before its reviewed merge to `main` triggers publishing.
-`build.yml` also supports a `dry_run` dispatch input so the complete wheel
-build and artifact checks can be performed without publishing or tagging. See the
+moves, `check-upstream.yml` commits the bump to `main` before building, and the
+`build.yml` publish job refuses to publish or tag if the built version differs
+from `pyproject.toml` at the tagged commit. `build.yml` also supports a
+`dry_run` dispatch input so the complete wheel build and artifact checks can be
+performed without publishing or tagging. See the
 [release checklist](ci.md#release-checklist) in `docs/ci.md` for the
 pre-merge operator gate and the release workflow.
 
