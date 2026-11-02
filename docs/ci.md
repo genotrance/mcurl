@@ -484,11 +484,14 @@ operator gate before the merge.
 ### Safe dry run
 
 Use **Actions → Check upstream LibCURL → Run workflow**, enable `dry_run`, and
-run it on `main`. The workflow obtains the upstream tag, calculates the target
-and tag state, checks the macOS Homebrew prerequisite when a release is due,
-and logs the files it would commit plus the exact existing SHA (or the parent
-of the new bump commit) it would build. It does not commit, push, dispatch a
-workflow, upload to PyPI, or tag. To exercise the wheel build separately,
+launch it from the default branch `devel`. The workflow itself checks out and
+evaluates `main` for the release decision regardless of the launch branch, so
+the plan reflects the release branch. The workflow obtains the upstream tag,
+calculates the target and tag state, checks the macOS Homebrew prerequisite
+when a release is due, and logs the files it would commit plus the exact
+existing SHA (or the parent of the new bump commit) it would build. It does
+not commit, push, dispatch a workflow, upload to PyPI, or tag. To exercise the
+wheel build separately,
 dispatch **Build wheels** on `main` with `dry_run` enabled and, optionally,
 the SHA reported by the upstream check. That run builds and verifies all
 artifacts but logs instead of uploading or tagging.
