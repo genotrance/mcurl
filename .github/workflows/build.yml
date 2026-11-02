@@ -18,8 +18,7 @@ on:
         type: boolean
 
 concurrency:
-  # Keep actual main releases behind check-upstream.yml's version decision.
-  group: ${{ inputs.dry_run && format('build-dry-run-{0}', github.run_id) || github.ref == 'refs/heads/main' && 'release-main' || format('build-{0}', github.ref) }}
+  group: ${{ inputs.dry_run && format('build-dry-run-{0}', github.run_id) || format('build-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:

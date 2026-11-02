@@ -180,7 +180,7 @@ Each `MCurl` instance manages its own curl multi handle with internal locking fo
 
 ## Versioning
 
-Version format is `X.Y.Z.P` where `X.Y.Z` matches the upstream libcurl version and `P` is the wrapper patch (starts at 1 per upstream release). Wheels are built automatically when a new [LibCURL_jll.jl](https://github.com/genotrance/LibCURL_jll.jl) release is detected.
+Version format is `X.Y.Z.P` where `X.Y.Z` matches the upstream libcurl version and `P` is the wrapper patch (starts at 1 per upstream release). A new [LibCURL_jll.jl](https://github.com/genotrance/LibCURL_jll.jl) release proposes a `devel` PR; wheels publish only after its reviewed merge to `main`.
 
 ## Documentation
 
