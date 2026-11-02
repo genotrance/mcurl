@@ -132,7 +132,7 @@ jobs:
           bash tools/brew_curl.sh --release
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v4.3.4
+        uses: pypa/cibuildwheel@v4.3.5
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
 
@@ -162,7 +162,7 @@ jobs:
           sed -i.bak "s/^version = \".*\"/version = \"${{ needs.setup.outputs.version }}\"/" pyproject.toml
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v4.3.4
+        uses: pypa/cibuildwheel@v4.3.5
         env:
           CIBW_ARCHS: x86_64
 
