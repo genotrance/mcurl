@@ -372,3 +372,61 @@ jobs:
             git tag "$TAG" "$(git rev-parse HEAD)"
             git push origin "$TAG"
           fi
+
+  back-merge:
+    needs: [setup, publish]
+    if: needs.publish.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: devel
+          fetch-depth: 0
+
+      - name: Merge main into devel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          DRY_RUN: ${{ needs.setup.outputs.dry_run }}
+          RELEASE_SHA: ${{ inputs.sha || github.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main devel
+          git checkout --detach origin/devel
+          if git merge-base --is-ancestor "$RELEASE_SHA" origin/devel; then
+            echo "devel already contains $RELEASE_SHA; nothing to merge." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          MERGED=true
+          git merge --no-ff --no-edit -m "Merge main (v$VERSION) into devel" "$RELEASE_SHA" || MERGED=false
+          if [ "$DRY_RUN" = true ]; then
+            if [ "$MERGED" = true ]; then
+              echo "Dry run: main would merge cleanly into devel." | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Dry run: merging main into devel would conflict; a back-merge PR would be needed." | tee -a "$GITHUB_STEP_SUMMARY"
+              git merge --abort
+            fi
+            exit 0
+          fi
+          if [ "$MERGED" = true ] && git push origin HEAD:devel; then
+            echo "Merged main (v$VERSION) into devel." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$MERGED" = true ] || git merge --abort
+          BRANCH="back-merge/v$VERSION"
+          git push origin "$RELEASE_SHA:refs/heads/$BRANCH"
+          COMPARE="$REPO_URL/compare/devel...$BRANCH"
+          if gh pr create --base devel --head "$BRANCH" \
+            --title "Merge main (v$VERSION) into devel" \
+            --body "Automatic back-merge after releasing v$VERSION failed (conflict or rejected push). Resolve and merge into devel."; then
+            echo "::error::Back-merge of v$VERSION into devel failed; opened a PR from $BRANCH."
+          else
+            echo "::error::Back-merge of v$VERSION into devel failed and no PR could be opened; merge branch $BRANCH manually: $COMPARE"
+          fi
+          echo "Back-merge failed; branch $BRANCH, compare: $COMPARE" >> "$GITHUB_STEP_SUMMARY"
+          exit 1

@@ -9,7 +9,7 @@ Three workflows power the CI/CD pipeline:
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | CI | `main.yml` | push to `main`/`devel`/`working`, PRs (fast lane); weekly cron Sat 03:00 UTC and manual dispatch with `full` (full lane) | Code quality + test matrix |
-| Build wheels | `build.yml` | push to `main`, manual dispatch | Build + publish to PyPI |
+| Build wheels | `build.yml` | push to `main`, manual dispatch | Build + publish to PyPI, then merge `main` back into `devel` |
 | Check upstream | `check-upstream.yml` | weekly cron (Mon 18:00 UTC), manual | Commit version bump and release new libcurl |
 
 ---
@@ -465,13 +465,21 @@ operator gate before the merge.
   from starting and later failing after the non-macOS wheels have built.
 - If `pyproject.toml` needs bumping it updates it, adds a
   "Updated to libcurl" entry to `docs/changelog.md`, commits and pushes to
-  `main` *before* anything is built. It fast-forwards `devel` only when
-  `devel` is already an ancestor of that commit. A diverged `devel` is left
-  untouched and reported as a warning, avoiding a force-push or automatic
-  merge commit.
+  `main` *before* anything is built. `devel` is not touched here: it only
+  receives what was actually released, through the post-release back-merge
+  below.
 - Dispatches `build.yml` on `main` with the exact commit SHA. Pushes made with
   `GITHUB_TOKEN` do not trigger the push-based `build.yml`, so the explicit
   dispatch is the only build and there is no double release.
+- After a successful publish on `main` (PyPI upload or existing release, plus
+  tag), the `back-merge` job in `build.yml` merges the released commit into
+  `devel` with a `--no-ff` merge commit by `github-actions[bot]` and pushes
+  `devel` (never forced), so `devel` always contains the released version.
+  If the merge conflicts or the push is rejected, it pushes the released
+  commit to `back-merge/v<version>`, tries to open a PR against `devel`, and
+  fails with an error naming the branch and a compare URL. In a `build.yml`
+  dry run it only merges locally and reports in the step summary whether
+  the merge would be clean or conflict; nothing is pushed.
 
 ### Safe dry run
 
@@ -492,9 +500,9 @@ artifacts but logs instead of uploading or tagging.
   plan.
 - If Homebrew is behind, wait for the next weekly run (or retry after
   Homebrew has published the matching curl). Do not bypass the macOS check.
-- If the version bump reaches `main` but `devel` is reported as diverged,
-  merge `main` into `devel` through the normal review process; the release
-  itself can continue because its SHA is already fixed.
+- If the `back-merge` job fails, resolve the `back-merge/v<version>`
+  branch against `devel` (open the PR from the reported compare URL if the
+  job could not) and merge it; the release itself is already complete.
 - If a build fails before PyPI upload, rerun `build.yml` with the reported
   SHA. If upload succeeds but tagging fails, rerun the same SHA: the PyPI
   check skips the duplicate upload and creates the missing tag.
@@ -503,9 +511,14 @@ artifacts but logs instead of uploading or tagging.
 
 ### Required repository settings
 - Settings → Actions → Workflow permissions must allow read and write (the
-  job requests `contents: write` and `actions: write`).
+  job requests `contents: write` and `actions: write`; `back-merge` requests
+  `contents: write` and `pull-requests: write`).
+- Settings → Actions → "Allow GitHub Actions to create and approve pull
+  requests" must be enabled for `back-merge` to open its fallback PR. While
+  it is off, `gh pr create` is refused and the job only pushes the branch
+  and reports the compare URL.
 - If `main` (or `devel`) is branch-protected, `github-actions[bot]` must be
-  allowed to push directly, otherwise the bump push fails; use a ruleset
+  allowed to push directly, otherwise the bump or back-merge push fails; use a ruleset
   bypass for GitHub Actions or a deploy key/PAT secret.
 - The PyPI trusted publisher stays configured for `build.yml` (the build is
   dispatched, not called as a reusable workflow, so no PyPI change is needed).
@@ -546,6 +559,5 @@ lock keeps working on 3.9-3.15 without these ignore rules.
 3. If the checklist passes → merge `devel` → `main`
 4. Push to `main` → CI runs + `build.yml` auto-publishes to PyPI + tags release
 5. New libcurl releases need no manual step: `check-upstream.yml` commits the
-   bump to `main`, fast-forwards `devel` only when `devel` is an ancestor of
-   that commit (otherwise it warns and leaves `devel` alone), and dispatches
-   the release build weekly.
+   bump to `main` and dispatches the release build weekly; after the release
+   is published, `build.yml` merges `main` back into `devel`.

@@ -178,20 +178,6 @@ jobs:
           git push origin HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Fast-forward devel to the bump
-        if: needs.check.outputs.bump == 'true' && needs.check.outputs.dry_run != 'true'
-        env:
-          RELEASE_SHA: ${{ steps.prepare.outputs.sha }}
-        run: |
-          git fetch origin devel
-          if ! git merge-base --is-ancestor origin/devel "$RELEASE_SHA"; then
-            echo "::warning::devel has diverged from main; leaving it unchanged. Merge main into devel manually."
-            exit 0
-          fi
-          if ! git push origin "$RELEASE_SHA:devel"; then
-            echo "::warning::Could not fast-forward devel; leaving it unchanged. Merge main into devel manually."
-          fi
-
       - name: Trigger build at committed SHA
         if: needs.check.outputs.dry_run != 'true'
         uses: actions/github-script@v9
