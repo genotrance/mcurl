@@ -379,7 +379,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -421,12 +420,6 @@ jobs:
           BRANCH="back-merge/v$VERSION"
           git push origin "$RELEASE_SHA:refs/heads/$BRANCH"
           COMPARE="$REPO_URL/compare/devel...$BRANCH"
-          if gh pr create --base devel --head "$BRANCH" \
-            --title "Merge main (v$VERSION) into devel" \
-            --body "Automatic back-merge after releasing v$VERSION failed (conflict or rejected push). Resolve and merge into devel."; then
-            echo "::error::Back-merge of v$VERSION into devel failed; opened a PR from $BRANCH."
-          else
-            echo "::error::Back-merge of v$VERSION into devel failed and no PR could be opened; merge branch $BRANCH manually: $COMPARE"
-          fi
+          echo "::error::Back-merge of v$VERSION into devel failed; merge branch $BRANCH manually: $COMPARE"
           echo "Back-merge failed; branch $BRANCH, compare: $COMPARE" >> "$GITHUB_STEP_SUMMARY"
           exit 1

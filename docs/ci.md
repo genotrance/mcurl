@@ -476,10 +476,11 @@ operator gate before the merge.
   `devel` with a `--no-ff` merge commit by `github-actions[bot]` and pushes
   `devel` (never forced), so `devel` always contains the released version.
   If the merge conflicts or the push is rejected, it pushes the released
-  commit to `back-merge/v<version>`, tries to open a PR against `devel`, and
-  fails with an error naming the branch and a compare URL. In a `build.yml`
-  dry run it only merges locally and reports in the step summary whether
-  the merge would be clean or conflict; nothing is pushed.
+  commit to `back-merge/v<version>`, writes a job summary containing the
+  GitHub compare link, and fails loudly without attempting PR creation. ORCA
+  can then resolve and merge the branch locally on devel as normal work.
+  In a `build.yml` dry run it only merges locally and reports in the step
+  summary whether the merge would be clean or conflict; nothing is pushed.
 
 ### Safe dry run
 
@@ -504,8 +505,8 @@ artifacts but logs instead of uploading or tagging.
 - If Homebrew is behind, wait for the next weekly run (or retry after
   Homebrew has published the matching curl). Do not bypass the macOS check.
 - If the `back-merge` job fails, resolve the `back-merge/v<version>`
-  branch against `devel` (open the PR from the reported compare URL if the
-  job could not) and merge it; the release itself is already complete.
+  branch against `devel` locally and merge it; the release itself is already
+  complete. The job summary contains the compare URL to use for reference.
 - If a build fails before PyPI upload, rerun `build.yml` with the reported
   SHA. If upload succeeds but tagging fails, rerun the same SHA: the PyPI
   check skips the duplicate upload and creates the missing tag.
@@ -514,12 +515,7 @@ artifacts but logs instead of uploading or tagging.
 
 ### Required repository settings
 - Settings → Actions → Workflow permissions must allow read and write (the
-  job requests `contents: write` and `actions: write`; `back-merge` requests
-  `contents: write` and `pull-requests: write`).
-- Settings → Actions → "Allow GitHub Actions to create and approve pull
-  requests" must be enabled for `back-merge` to open its fallback PR. While
-  it is off, `gh pr create` is refused and the job only pushes the branch
-  and reports the compare URL.
+  jobs request `contents: write` and `actions: write`).
 - If `main` (or `devel`) is branch-protected, `github-actions[bot]` must be
   allowed to push directly, otherwise the bump or back-merge push fails; use a ruleset
   bypass for GitHub Actions or a deploy key/PAT secret.
