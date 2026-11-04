@@ -74,7 +74,7 @@ jobs:
 
   build-sdist:
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -100,7 +100,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             arch: i686
             cibw_archs: i686
           - os: ubuntu-24.04-arm
@@ -147,7 +147,7 @@ jobs:
     # matrix (aarch64 and macOS runners are consistently the slowest).
     needs: setup
     name: Build ubuntu-latest x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -176,7 +176,7 @@ jobs:
     # gate. Normal devel dispatches do not need the Docker scenario environment.
     if: needs.setup.outputs.dry_run == 'true' || (needs.setup.outputs.publish == 'true' && github.ref == 'refs/heads/main')
     needs: [setup, build-wheel-linux-x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Resolve latest px release tag

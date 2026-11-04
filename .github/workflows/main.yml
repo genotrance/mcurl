@@ -40,19 +40,19 @@ jobs:
           full = os.environ["FULL"] == "true"
           if full:
               tests = (
-                  [("ubuntu-latest", v) for v in ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "pypy3.11")]
+                  [("ubuntu-24.04", v) for v in ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "pypy3.11")]
                   + [("ubuntu-24.04-arm", v) for v in ("3.9", "3.13", "3.14", "3.15", "pypy3.11")]
                   # PyPy on macOS is intentionally excluded (cffi conflict, see docs/ci.md)
                   + [("macos-15", v) for v in ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15")]
               )
               windows = ["cp39", "cp312", "cp313", "cp314", "cp315", "cp315t"]
               linux_wheels = [("i686", "cp39"), ("i686", "cp314"), ("i686", "cp315"), ("x86_64", "cp315t")]
-              musl_wheels = [("ubuntu-latest", "x86_64", "cp315"), ("ubuntu-24.04-arm", "aarch64", "cp315")]
+              musl_wheels = [("ubuntu-24.04", "x86_64", "cp315"), ("ubuntu-24.04-arm", "aarch64", "cp315")]
           else:
               tests = [
-                  ("ubuntu-latest", "3.9"),
-                  ("ubuntu-latest", "3.15"),
-                  ("ubuntu-latest", "pypy3.11"),
+                  ("ubuntu-24.04", "3.9"),
+                  ("ubuntu-24.04", "3.15"),
+                  ("ubuntu-24.04", "pypy3.11"),
                   ("ubuntu-24.04-arm", "3.15"),
                   ("macos-15", "3.15"),
               ]
@@ -131,6 +131,12 @@ jobs:
           LIB_DIRS=$(uv run --locked python -m jbb -d "$RUNNER_TEMP/mcurl/$(uv run --locked python -c 'import jbb; print(jbb.get_key())')" -q -p genotrance "LibCURL-v$LIBCURL_VERSION")
           echo "LD_LIBRARY_PATH=${LIB_DIRS}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
+      - name: Verify ssl and mcurl import with LD_LIBRARY_PATH (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          uv run --locked python -c "import ssl" || { echo "::error::import ssl failed: the jbb libs on LD_LIBRARY_PATH likely shadow the interpreter's OpenSSL"; exit 1; }
+          uv run --locked python -c "import mcurl" || { echo "::error::import mcurl failed with LD_LIBRARY_PATH=$LD_LIBRARY_PATH"; exit 1; }
+
       - name: Set DYLD_LIBRARY_PATH for brew libcurl (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -168,7 +174,7 @@ jobs:
           CIBW_TEST_SKIP: ""
 
   tests-i686:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: plan
     strategy:
       fail-fast: false
