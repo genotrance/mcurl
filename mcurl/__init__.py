@@ -46,6 +46,9 @@ REWIND_ERROR = (
     "Request body cannot be resent: it was sent on a proxy authentication leg "
     "and the body source cannot rewind (proxy ignored Expect: 100-continue?); "
 )
+NEGOTIATE_NO_CREDENTIALS = (
+    "Negotiate has no Kerberos credentials for this proxy name; libcurl no longer falls back to NTLM inside Negotiate; "
+)
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
 MULTI_SELECT_TIMEOUT = 1.0
@@ -427,7 +430,6 @@ class Curl:
     # Proxy for which this handle holds the auth retry probe slot
     _probe_proxy = None
     _stopped = False
-    _negotiate_retried = False
     _ntlm_reconnect_rejected = False
     _ntlm_reconnect_retried = False
     _debug = False
@@ -623,7 +625,6 @@ class Curl:
 
         self.cerr = libcurl.CURLE_OK
         self._stopped = False
-        self._negotiate_retried = False
         self._ntlm_reconnect_rejected = False
         self._ntlm_reconnect_retried = False
         self._debug = False
@@ -1247,7 +1248,6 @@ class Curl:
         new.sentheaders = False
         new.suppress = False
         new._stopped = False
-        new._negotiate_retried = False
         new._ntlm_reconnect_rejected = False
         new._ntlm_reconnect_retried = False
         new._debug = False
@@ -2117,7 +2117,6 @@ class MCurl:
             # Any other error, or a failed (re)connect, interrupted the handshake
             # and leaves the 407 of an intermediate leg in HTTP_CONNECTCODE (px#268).
             auth_failed = None
-            retry_without_negotiate = False
             retry_after_reconnect = False
             if curl.proxy is not None:
                 aborted = curl._stopped or curl.cerr == getattr(libcurl, "CURLE_ABORTED_BY_CALLBACK", None)
@@ -2138,23 +2137,13 @@ class MCurl:
                     elif curl.auth is not None:
                         ret_pa, proxyauth_used = curl.get_proxyauth_used()
                         ret_nc, num_connects = curl.get_num_connects()
-                        if (
-                            not curl._negotiate_retried
-                            and curl.auth & libcurl.CURLAUTH_NTLM
-                            and ret_pa == libcurl.CURLE_OK
-                            and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE
-                        ):
-                            # ANY picked Negotiate and GSS-API failed locally (no
-                            # ticket) without ever trying NTLM, which the proxy also
-                            # offered (libcurl http.c authproblem). SSPI on Windows
-                            # falls back to NTLM by itself, so proxyauth_used is
-                            # never left at NEGOTIATE there and this never matches.
-                            retry_without_negotiate = True
-                            if curl._content_length and curl._seek(0, 0) != libcurl.CURL_SEEKFUNC_OK:
-                                # Body cannot be resent: inconclusive, not an auth failure
-                                retry_without_negotiate = False
-                                curl.resp = 503
-                                curl.errstr += "Request body cannot be resent for NTLM retry; "
+                        if ret_pa == libcurl.CURLE_OK and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE:
+                            # Libcurl selected Negotiate but could not acquire a
+                            # local Kerberos credential. It no longer retries as
+                            # NTLM, and neither should mcurl. This is actionable
+                            # configuration state rather than a rejected password.
+                            curl.resp = 401
+                            curl.errstr = NEGOTIATE_NO_CREDENTIALS
                         elif (
                             not curl._ntlm_reconnect_retried
                             and ret_nc == libcurl.CURLE_OK
@@ -2194,19 +2183,11 @@ class MCurl:
                     # Successful (or non‑auth) response – reset failure counter for this proxy
                     auth_failed = False
 
-            if retry_without_negotiate or retry_after_reconnect:
-                if retry_without_negotiate:
-                    # Retry once with Negotiate removed from the mask so libcurl's
-                    # next attempt picks NTLM instead; this attempt does not count.
-                    dprint(curl.easyhash + ": Negotiate failed locally, retrying with NTLM")
-                    curl._negotiate_retried = True
-                    curl.auth &= ~libcurl.CURLAUTH_NEGOTIATE
-                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_PROXYAUTH, py2clong(curl.auth))
-                else:
-                    dprint(curl.easyhash + ": NTLM resumed after reconnect, retrying on a fresh connection")
-                    curl._ntlm_reconnect_retried = True
-                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FRESH_CONNECT, py2cbool(True))
-                    libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FORBID_REUSE, py2cbool(True))
+            if retry_after_reconnect:
+                dprint(curl.easyhash + ": NTLM resumed after reconnect, retrying on a fresh connection")
+                curl._ntlm_reconnect_retried = True
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FRESH_CONNECT, py2cbool(True))
+                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_FORBID_REUSE, py2cbool(True))
                 if not curl.is_easy:
                     with self._lock:
                         self._remove_handle(curl)

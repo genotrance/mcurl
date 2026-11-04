@@ -172,7 +172,7 @@ with automatic Python-to-C type conversion.
 | Method | Description |
 |--------|-------------|
 | `set_xferinfo(callback)` | Set transfer progress callback `fn(dltotal, dlnow, ultotal, ulnow) -> int` |
-| `set_seek(callback=None)` | Set seek callback `fn(offset, origin) -> int`; returns `CURL_SEEKFUNC_OK`(0)/`FAIL`(1)/`CANTSEEK`(2). A rewind to offset 0 restores the declared Content-Length, so the body is resent across proxy auth legs; without a working seek, the Negotiate-to-NTLM retry of a request with a body is skipped (inconclusive, 503) |
+| `set_seek(callback=None)` | Set seek callback `fn(offset, origin) -> int`; returns `CURL_SEEKFUNC_OK`(0)/`FAIL`(1)/`CANTSEEK`(2). A rewind to offset 0 restores the declared Content-Length, so the body can be resent across proxy authentication legs |
 
 ### Handle duplication and lifecycle
 
@@ -259,14 +259,12 @@ rejected` diagnostic with `CURLINFO_NUM_CONNECTS > 1`; the latter counts only
 successful connections, so failed happy-eyeballs addresses cannot conceal a
 genuine 407.
 
-With auth `ANY` on Linux/macOS, a proxy offering both Negotiate and NTLM
-makes libcurl pick Negotiate; without a Kerberos ticket, GSS-API fails to
-produce a token and libcurl surfaces the proxy's original 407 without ever
-trying NTLM. `do()` detects this case (`get_proxyauth_used()` returns
-`CURLAUTH_NEGOTIATE` on a final 407) and retries the request once with
-Negotiate removed from the auth mask, so the retry uses NTLM; only a failure
-of that retry counts towards the threshold. Windows SSPI already falls back
-to NTLM internally, so this never triggers there.
+When auth `ANY` selects Negotiate but no Kerberos credentials exist for the
+proxy name, `do()` returns 401 with `Negotiate has no Kerberos credentials for
+this proxy name; libcurl no longer falls back to NTLM inside Negotiate;`.
+This configuration result does not count towards the proxy block threshold.
+mcurl does not fall back to NTLM: use `auth="NTLM"` explicitly or register a
+Kerberos SPN for the proxy name.
 
 ### Streamed request bodies
 

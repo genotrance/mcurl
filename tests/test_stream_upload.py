@@ -18,7 +18,6 @@ import select
 import socket
 import socketserver
 import struct
-import sys
 import threading
 import time
 
@@ -367,16 +366,9 @@ def _expected(length):
     return src.sha.hexdigest()
 
 
-PROXIES = [pytest.param({}, id="ntlm")]
-if sys.platform != "win32":
-    # ANY picks Negotiate first; GSS-API fails locally without a ticket and
-    # do() retries with NTLM, which needs the body to be still unread
-    PROXIES.append(pytest.param({"negotiate": True}, id="negotiate"))
-
-
 @pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
-@pytest.mark.parametrize("proxy", PROXIES, indirect=True)
+@pytest.mark.parametrize("proxy", [pytest.param({}, id="ntlm")], indirect=True)
 def test_unknown_auth_streamed_body(proxy, multi, method, easy):
     source = StreamSource(20000)
     ok, curl = _upload(multi, proxy, method, source, 20000, easy=easy)

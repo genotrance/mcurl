@@ -243,21 +243,14 @@ def _burst(multi, url, connect, count=BURST, user=USER, auth="ANY"):
     return results
 
 
-VARIANTS = [
+NTLM_VARIANTS = [
     pytest.param({}, id="keepalive"),
     pytest.param({"close_first": True}, id="close"),
 ]
-if sys.platform != "win32":
-    # Windows SSPI handles the synthetic Negotiate exchange differently from
-    # the GSS-API path this regression covers.
-    VARIANTS.extend([
-        pytest.param({"negotiate": True}, id="negotiate-keepalive"),
-        pytest.param({"negotiate": True, "close_first": True}, id="negotiate-close"),
-    ])
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
-@pytest.mark.parametrize("ntlm_proxy", VARIANTS, indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_concurrent_multi_leg_auth_does_not_block(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
@@ -276,7 +269,7 @@ def test_concurrent_multi_leg_auth_does_not_block(ntlm_proxy, connect):
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
-@pytest.mark.parametrize("ntlm_proxy", VARIANTS, indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_success_resets_failures(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
@@ -284,15 +277,13 @@ def test_success_resets_failures(ntlm_proxy, connect):
         admitted, ok, curl = _request(multi, ntlm_proxy.url, connect)
         assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
         assert multi.failed[ntlm_proxy.url] == 0
-        # Negotiate+NTLM proxies: confirms ANY actually fell back to NTLM,
-        # not that Negotiate somehow completed (it cannot, without a KDC)
         assert multi.proxyauth.get(ntlm_proxy.url) == mcurl.libcurl.CURLAUTH_NTLM
     finally:
         multi.close()
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
-@pytest.mark.parametrize("ntlm_proxy", VARIANTS, indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_wrong_credentials_block_after_threshold(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
@@ -320,7 +311,7 @@ def test_wrong_credentials_burst_blocks(ntlm_proxy, connect):
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
-@pytest.mark.parametrize("ntlm_proxy", VARIANTS[:2], indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_interrupted_handshakes_do_not_count(ntlm_proxy, connect):
     # Handshakes cut by a network error before type2 are inconclusive, even
     # though libcurl still reports the earlier 407 leg as HTTP_CONNECTCODE
@@ -341,7 +332,7 @@ def test_interrupted_handshakes_do_not_count(ntlm_proxy, connect):
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
-@pytest.mark.parametrize("ntlm_proxy", VARIANTS[:2], indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_concurrent_interrupted_handshakes_do_not_block(ntlm_proxy, connect):
     multi = mcurl.MCurl()
     try:
@@ -425,7 +416,7 @@ def test_407_close_then_refused_reconnect_is_inconclusive(ntlm_proxy, connect):
 
 
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
-@pytest.mark.parametrize("ntlm_proxy", VARIANTS[:2], indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_truncated_407_headers_do_not_count(ntlm_proxy, connect):
     # A proxy that closes in the middle of the 407 header block never gave an
     # auth answer, even if libcurl reports CURLE_OK with response code 407
@@ -443,14 +434,13 @@ def test_truncated_407_headers_do_not_count(ntlm_proxy, connect):
         multi.close()
 
 
-@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
+@pytest.mark.parametrize("ntlm_proxy", [{}], indirect=True)
 def test_failed_auth_method_is_not_cached(ntlm_proxy):
-    # ANY picks Negotiate, which cannot complete without a KDC, so mcurl
-    # retries with NTLM; with a wrong password that also fails, and the final
-    # 407 must not cache a method that overrides a later explicit NTLM request
+    # A wrong NTLM password must not cache a method that overrides a later
+    # explicit NTLM request.
     multi = mcurl.MCurl()
     try:
-        admitted, ok, curl = _request(multi, ntlm_proxy.url, False, user="wrong", auth="ANY")
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, False, user="wrong", auth="NTLM")
         assert admitted and not ok and curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
         assert ntlm_proxy.url not in multi.proxyauth
         assert multi.failed[ntlm_proxy.url] == 1
@@ -458,6 +448,34 @@ def test_failed_auth_method_is_not_cached(ntlm_proxy):
         assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
         assert multi.failed[ntlm_proxy.url] == 0
         assert multi.proxyauth.get(ntlm_proxy.url) == mcurl.libcurl.CURLAUTH_NTLM
+    finally:
+        multi.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows SSPI handling of the synthetic Negotiate challenge is not validated here",
+)
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+@pytest.mark.parametrize(
+    "ntlm_proxy",
+    [{"negotiate": True}, {"negotiate": True, "close_first": True}],
+    indirect=True,
+    ids=["negotiate-keepalive", "negotiate-close"],
+)
+def test_negotiate_without_kerberos_does_not_fallback_or_block(ntlm_proxy, connect):
+    multi = mcurl.MCurl()
+    try:
+        for _ in range(multi.failure_threshold + 2):
+            admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, auth="ANY")
+            assert admitted and not ok, (curl.cerr, curl.resp, curl.errstr)
+            assert curl.resp == 401
+            assert curl.errstr == mcurl.NEGOTIATE_NO_CREDENTIALS
+            assert multi.failed.get(ntlm_proxy.url, 0) == 0
+
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, auth="NTLM")
+        assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
+        assert multi.failed[ntlm_proxy.url] == 0
     finally:
         multi.close()
 
@@ -528,11 +546,12 @@ def _body_request(multi, url, method, body, auth="ANY", user=USER, easy=False):
 
 @pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
 @pytest.mark.parametrize("method", ["POST", "PUT"])
-@pytest.mark.parametrize("ntlm_proxy", [v.values[0] for v in VARIANTS], ids=[v.id for v in VARIANTS], indirect=True)
+@pytest.mark.parametrize(
+    "ntlm_proxy", [v.values[0] for v in NTLM_VARIANTS], ids=[v.id for v in NTLM_VARIANTS], indirect=True
+)
 def test_body_resent_across_auth_legs(ntlm_proxy, method, easy):
     # ANY sends the whole body on the first unauthenticated leg, so libcurl has
-    # to rewind and resend it on the authenticated leg (and, with Negotiate
-    # failing locally, once more for the NTLM retry)
+    # to rewind and resend it on the authenticated leg.
     multi = mcurl.MCurl()
     try:
         ok, curl = _body_request(multi, ntlm_proxy.url, method, BODY, easy=easy)
@@ -561,7 +580,7 @@ def test_body_explicit_ntlm(ntlm_proxy, method, easy):
 @pytest.mark.parametrize("method", ["POST", "PUT"])
 @pytest.mark.parametrize(
     "ntlm_proxy",
-    [{"negotiate": True}, {"negotiate": True, "close_first": True}],
+    [{}, {"close_first": True}],
     indirect=True,
     ids=["keepalive", "close"],
 )
@@ -572,24 +591,5 @@ def test_body_wrong_password_counts_once(ntlm_proxy, method, easy):
         assert not ok and curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
         assert multi.failed[ntlm_proxy.url] == 1
         assert ntlm_proxy.bodies == []
-    finally:
-        multi.close()
-
-
-@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
-def test_body_not_rewindable_negotiate_retry_is_inconclusive(ntlm_proxy):
-    # A body source that cannot seek cannot be resent for the NTLM retry: the
-    # result is inconclusive and does not count as an auth failure
-    multi = mcurl.MCurl()
-    try:
-        curl = mcurl.Curl(TARGET, method="POST")
-        curl.buffer(BODY)
-        curl.set_seek(lambda offset, origin: mcurl.libcurl.CURL_SEEKFUNC_CANTSEEK)
-        curl.set_headers({"Content-Length": str(len(BODY))})
-        assert curl.set_proxy(ntlm_proxy.url)
-        curl.set_auth(USER, "pass", auth="ANY")
-        assert not multi.do(curl)
-        assert curl.resp != 401
-        assert multi.failed.get(ntlm_proxy.url, 0) == 0
     finally:
         multi.close()
