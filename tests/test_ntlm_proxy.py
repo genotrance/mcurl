@@ -66,6 +66,7 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         self.challenges = 0  # 407 responses sent, intermediate or final
         self.authenticated = 0  # Successful type3 legs
         self.bodies = []  # (method, body) of requests answered after authentication
+        self.negotiate_tokens = 0  # Requests that carried Proxy-Authorization: Negotiate
 
     @property
     def url(self):
@@ -132,6 +133,9 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
         server = self.server
         scheme, _, token = headers.get("proxy-authorization", "").partition(" ")
         msg = base64.b64decode(token) if scheme.upper() == "NTLM" and token else b""
+        if scheme.upper() == "NEGOTIATE" and token:
+            with server.lock:
+                server.negotiate_tokens += 1
         kind = struct.unpack("<I", msg[8:12])[0] if len(msg) >= 12 else 0
         if kind == 1:
             with server.lock:
@@ -211,8 +215,9 @@ def ffi_slist_guard(slist):
     return mcurl.ffi.gc(slist, mcurl.libcurl.curl_slist_free_all)
 
 
-def _request(multi, url, connect, user=USER, auth="ANY", resolve=None):
-    # Returns (admitted, success, curl); resolve is a CURLOPT_RESOLVE entry
+def _request(multi, url, connect, user=USER, auth="ANY", resolve=None, header=None):
+    # Returns (admitted, success, curl); resolve is a CURLOPT_RESOLVE entry,
+    # header a raw request header that libcurl also sends to the proxy
     curl = mcurl.Curl(CONNECT_TARGET, method="CONNECT") if connect else mcurl.Curl(TARGET)
     if not connect:
         curl.buffer()
@@ -222,6 +227,14 @@ def _request(multi, url, connect, user=USER, auth="ANY", resolve=None):
         slist = mcurl.libcurl.curl_slist_append(mcurl.ffi.NULL, resolve.encode())
         curl._keepalive.append(ffi_slist_guard(slist))
         curl.setopt(mcurl.libcurl.CURLOPT_RESOLVE, slist)
+    if header is not None:
+        slist = mcurl.libcurl.curl_slist_append(mcurl.ffi.NULL, header.encode())
+        curl._keepalive.append(ffi_slist_guard(slist))
+        curl.setopt(mcurl.libcurl.CURLOPT_HTTPHEADER, slist)
+        if connect:
+            # libcurl sends CURLOPT_PROXYHEADER, not HTTPHEADER, in CONNECT
+            curl.setopt(mcurl.libcurl.CURLOPT_HEADEROPT, mcurl.libcurl.CURLHEADER_SEPARATE)
+            curl.setopt(mcurl.libcurl.CURLOPT_PROXYHEADER, slist)
     curl.set_auth(user, "pass", auth=auth)
     ok = multi.do(curl)
     return True, ok, curl
@@ -476,6 +489,85 @@ def test_negotiate_without_kerberos_does_not_fallback_or_block(ntlm_proxy, conne
         admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, auth="NTLM")
         assert admitted and ok, (curl.cerr, curl.resp, curl.errstr)
         assert multi.failed[ntlm_proxy.url] == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows SSPI handling of the synthetic Negotiate challenge is not validated here",
+)
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
+def test_rejected_negotiate_token_counts_and_blocks(ntlm_proxy, connect):
+    # A Negotiate token that reached the proxy and was answered with 407 is a
+    # server rejection: generic auth failure, counted, blocked at threshold
+    header = "Proxy-Authorization: Negotiate " + base64.b64encode(b"synthetic token").decode()
+    multi = mcurl.MCurl()
+    try:
+        for i in range(multi.failure_threshold):
+            admitted, ok, curl = _request(multi, ntlm_proxy.url, connect, header=header)
+            assert admitted and not ok, (curl.cerr, curl.resp, curl.errstr)
+            assert curl.resp == 401
+            assert "Proxy authentication failed: " in curl.errstr
+            assert mcurl.NEGOTIATE_NO_CREDENTIALS not in curl.errstr
+            assert multi.failed[ntlm_proxy.url] == i + 1
+        assert ntlm_proxy.negotiate_tokens >= multi.failure_threshold
+        assert not _request(multi, ntlm_proxy.url, connect)[0]
+    finally:
+        multi.close()
+
+
+class _FakeNegotiateCurl:
+    # Drives MCurl._negotiate_local_failure() and the CURLE_AUTH_ERROR mapping
+    # without a KDC or Windows credentials
+    def __init__(self, token_sent, used=None):
+        self.auth = mcurl.libcurl.CURLAUTH_ANY
+        self._negotiate_token_sent = token_sent
+        self.used = mcurl.libcurl.CURLAUTH_NEGOTIATE if used is None else used
+
+    def get_proxyauth_used(self):
+        return mcurl.libcurl.CURLE_OK, self.used
+
+
+@pytest.mark.parametrize(
+    ("token_sent", "used", "local"),
+    [(False, None, True), (True, None, False), (False, "NTLM", False)],
+    ids=["no-token", "token-sent", "ntlm-selected"],
+)
+def test_negotiate_local_failure_classification(token_sent, used, local):
+    used = getattr(mcurl.libcurl, f"CURLAUTH_{used}") if used else None
+    assert mcurl.MCurl._negotiate_local_failure(_FakeNegotiateCurl(token_sent, used)) is local
+
+
+@pytest.mark.parametrize("token_sent", [False, True], ids=["no-token", "token-sent"])
+def test_negotiate_auth_error_classification(ntlm_proxy, monkeypatch, token_sent):
+    # CURLE_AUTH_ERROR is libcurl's local GSS-API/SSPI failure. With Negotiate
+    # selected and no token sent it gets the specific, non-counted error even
+    # beyond the threshold; otherwise the generic CURLE_AUTH_ERROR handling.
+    def fake_perform(self):
+        self.cerr = mcurl.libcurl.CURLE_AUTH_ERROR
+        self._negotiate_token_sent = token_sent
+
+    monkeypatch.setattr(mcurl.Curl, "perform", fake_perform)
+    monkeypatch.setattr(
+        mcurl.Curl, "get_proxyauth_used", lambda self: (mcurl.libcurl.CURLE_OK, mcurl.libcurl.CURLAUTH_NEGOTIATE)
+    )
+    multi = mcurl.MCurl()
+    try:
+        for _ in range(multi.failure_threshold + 2):
+            curl = mcurl.Curl(TARGET)
+            curl.is_easy = True
+            assert curl.set_proxy(ntlm_proxy.url)
+            curl.set_auth(USER, "pass", auth="ANY")
+            assert not multi.do(curl)
+            if token_sent:
+                assert curl.resp == 407
+                assert curl.errstr == mcurl.Curl.strerror(mcurl.libcurl.CURLE_AUTH_ERROR)
+            else:
+                assert curl.resp == 401
+                assert curl.errstr == mcurl.NEGOTIATE_NO_CREDENTIALS
+            assert multi.failed.get(ntlm_proxy.url, 0) == 0
     finally:
         multi.close()
 

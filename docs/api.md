@@ -263,6 +263,15 @@ When auth `ANY` selects Negotiate but no Kerberos credentials exist for the
 proxy name, `do()` returns 401 with `Negotiate has no Kerberos credentials for
 this proxy name; libcurl no longer falls back to NTLM inside Negotiate;`.
 This configuration result does not count towards the proxy block threshold.
+The classification is evidence based, not on the selected method alone: the
+debug callback records whether a `Proxy-Authorization: Negotiate <token>`
+header was sent. A local failure is `CURLE_AUTH_ERROR` (libcurl's
+`gss_init_sec_context` or SSPI `AcquireCredentialsHandle` /
+`InitializeSecurityContext` failed, e.g. `SEC_E_NO_CREDENTIALS`) or a final
+407, either with Negotiate selected and no token sent. When a Negotiate token
+was sent and the proxy still answers 407, the proxy rejected it: `do()` reports
+the generic `Proxy authentication failed` error and the failure counts towards
+the block threshold. Other `CURLE_AUTH_ERROR` results keep the generic 407.
 mcurl does not fall back to NTLM: use `auth="NTLM"` explicitly or register a
 Kerberos SPN for the proxy name.
 
