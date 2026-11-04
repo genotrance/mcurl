@@ -5,6 +5,7 @@ import contextlib
 import io
 import os.path
 import platform
+import re
 import select
 import socket
 import sys
@@ -46,6 +47,7 @@ REWIND_ERROR = (
     "Request body cannot be resent: it was sent on a proxy authentication leg "
     "and the body source cannot rewind (proxy ignored Expect: 100-continue?); "
 )
+NEGOTIATE_TOKEN_SENT = re.compile(r"proxy-authorization:\s*negotiate\s+\S", re.IGNORECASE)
 NEGOTIATE_NO_CREDENTIALS = (
     "Negotiate has no Kerberos credentials for this proxy name; libcurl no longer falls back to NTLM inside Negotiate; "
 )
@@ -193,6 +195,13 @@ def debug_callback(easy, infotype, data, size, userp):
         prefix = easyhash + ": Received header <= "
     elif infotype == libcurl.CURLINFO_HEADER_OUT:
         prefix = easyhash + ": Sent header => "
+        if not curl._negotiate_token_sent:
+            # Evidence that a Negotiate token reached the proxy: a 407 after
+            # it is a server rejection, not a missing local credential
+            for msg in yield_msgs(data, size):
+                if NEGOTIATE_TOKEN_SENT.match(msg):
+                    curl._negotiate_token_sent = True
+                    break
     else:
         return libcurl.CURLE_OK
 
@@ -432,6 +441,7 @@ class Curl:
     _stopped = False
     _ntlm_reconnect_rejected = False
     _ntlm_reconnect_retried = False
+    _negotiate_token_sent = False
     _debug = False
 
     @staticmethod
@@ -627,6 +637,7 @@ class Curl:
         self._stopped = False
         self._ntlm_reconnect_rejected = False
         self._ntlm_reconnect_retried = False
+        self._negotiate_token_sent = False
         self._debug = False
         self.done = False
         self.errstr = ""
@@ -1250,6 +1261,7 @@ class Curl:
         new._stopped = False
         new._ntlm_reconnect_rejected = False
         new._ntlm_reconnect_retried = False
+        new._negotiate_token_sent = False
         new._debug = False
         new.is_connect = False
         new.is_patch = False
@@ -2036,6 +2048,14 @@ class MCurl:
                 dprint(f"Dropped dead socket {sock_fd}")
                 self._socket_action(sock_fd, libcurl.CURL_CSELECT_ERR)
 
+    @staticmethod
+    def _negotiate_local_failure(curl: Curl):
+        "True if libcurl selected proxy Negotiate but never sent a Negotiate token"
+        if curl.auth is None or curl._negotiate_token_sent:
+            return False
+        ret, proxyauth_used = curl.get_proxyauth_used()
+        return ret == libcurl.CURLE_OK and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE
+
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
         while True:
@@ -2044,6 +2064,7 @@ class MCurl:
                 # connection existed. Keep libcurl's precise NTLM diagnostic
                 # too, so a normal close-and-restart handshake still counts.
                 curl._ntlm_reconnect_rejected = False
+                curl._negotiate_token_sent = False
                 libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_VERBOSE, py2cbool(True))
                 libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
             if not curl.is_easy:
@@ -2097,6 +2118,11 @@ class MCurl:
                 # Network error
                 curl.resp = 502
                 curl.errstr += Curl.strerror(curl.cerr)
+            elif curl.cerr == libcurl.CURLE_AUTH_ERROR and self._negotiate_local_failure(curl):
+                # gss_init_sec_context or SSPI failed before any Negotiate
+                # token was sent: no local credential, not a rejection
+                curl.resp = 401
+                curl.errstr = NEGOTIATE_NO_CREDENTIALS
             elif curl.cerr == libcurl.CURLE_AUTH_ERROR:
                 # Auth function error (SSPI/GSS-API failure)
                 curl.resp = 407
@@ -2135,13 +2161,12 @@ class MCurl:
                         curl.resp = 502
                         curl.errstr += "Truncated proxy response; "
                     elif curl.auth is not None:
-                        ret_pa, proxyauth_used = curl.get_proxyauth_used()
                         ret_nc, num_connects = curl.get_num_connects()
-                        if ret_pa == libcurl.CURLE_OK and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE:
-                            # Libcurl selected Negotiate but could not acquire a
-                            # local Kerberos credential. It no longer retries as
-                            # NTLM, and neither should mcurl. This is actionable
-                            # configuration state rather than a rejected password.
+                        if self._negotiate_local_failure(curl):
+                            # Libcurl selected Negotiate but sent no token: it
+                            # could not acquire a local Kerberos credential. It
+                            # no longer retries as NTLM, and neither should
+                            # mcurl. A rejected token is a normal auth failure.
                             curl.resp = 401
                             curl.errstr = NEGOTIATE_NO_CREDENTIALS
                         elif (
