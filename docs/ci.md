@@ -48,7 +48,7 @@ so slow tests run everywhere:
   free-threaded cp315t.
 - Linux wheels (cibuildwheel): i686 cp39, cp314, cp315 and free-threaded
   cp315t on manylinux x86_64.
-- musllinux wheels (cibuildwheel, `tests-musl`): x86_64 on `ubuntu-latest` and
+- musllinux wheels (cibuildwheel, `tests-musl`): x86_64 on `ubuntu-24.04` and
   aarch64 on `ubuntu-24.04-arm`, each cp315 with the full suite including slow
   tests. The release build only smoke-tests musllinux wheels, so these two
   jobs are the only place the full suite runs on musl. They are not in the
@@ -154,10 +154,10 @@ Record the measured totals here next to the baseline.
 
 ### Jobs
 
-**`plan`** (ubuntu-latest): selects the lane and outputs the matrices and the
+**`plan`** (ubuntu-24.04): selects the lane and outputs the matrices and the
 pytest marker arguments.
 
-**`quality`** (ubuntu-latest):
+**`quality`** (ubuntu-24.04):
 - Checks out the repo
 - Runs `make check` (pre-commit hooks + mypy)
 
@@ -193,7 +193,7 @@ pytest marker arguments.
 
 **`tests-musl`** (full lane only; named `test musllinux <arch> <python>`):
 - Builds and tests cp315 musllinux wheels via cibuildwheel on x86_64
-  (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`), following the i686 job
+  (`ubuntu-24.04`) and aarch64 (`ubuntu-24.04-arm`), following the i686 job
   pattern: runs the full test suite, not the `smoke` selection.
 - Added because the release build (`build.yml`) only smoke-tests wheels; the
   full suite on musl runs only in this job (see `docs/testing.md` for test
@@ -229,6 +229,12 @@ The library search path for test time is set by steps in the `tests` job of
   `LD_LIBRARY_PATH` to the matching `genotrance` jbb download so the extension
   can load. This avoids relying on a prior build having populated the same jbb
   cache.
+- On Linux: then checks `import ssl` and `import mcurl` with that path in
+  effect, so an OpenSSL mismatch between the jbb libs and the interpreter
+  fails fast with a clear message.
+- Linux jobs are pinned to `ubuntu-24.04` instead of `ubuntu-latest`: the
+  latter moved to Ubuntu 26.04, which has no hosted CPython 3.9 and whose
+  Python needs a newer OpenSSL than the one bundled with the jbb libcurl.
 - On macOS: sets `DYLD_LIBRARY_PATH` to point at the Homebrew libcurl
   directories. At build time, rpaths are embedded via `-Wl,-rpath` so installed
   wheels do not need `DYLD_LIBRARY_PATH` at runtime.

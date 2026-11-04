@@ -91,6 +91,11 @@ different Python prefix than CPython.
 
 ### cibuildwheel configuration
 
+The `before-all` hook installs libffi headers only when `ffi.h` is not already
+present, and retries `yum` a few times, so a transient or unreachable package
+mirror (the manylinux i686 image's vault host stopped resolving) no longer
+fails the i686 build when headers already exist.
+
 cibuildwheel is configured in `pyproject.toml` under `[tool.cibuildwheel]`.
 The build uses `build[uv]` as the frontend for speed. Only the `pypy` enable
 group is on, so PyPy 3.11 and 3.12 are built and the PyPy-EOL versions are not.
