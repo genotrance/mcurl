@@ -47,8 +47,7 @@ REWIND_ERROR = (
     "and the body source cannot rewind (proxy ignored Expect: 100-continue?); "
 )
 NEGOTIATE_NO_CREDENTIALS = (
-    "Negotiate has no Kerberos credentials for this proxy name; "
-    "libcurl no longer falls back to NTLM inside Negotiate; "
+    "Negotiate has no Kerberos credentials for this proxy name; libcurl no longer falls back to NTLM inside Negotiate; "
 )
 LOW_SPEED_LIMIT = 1
 LOW_SPEED_TIME = 120
@@ -2138,10 +2137,7 @@ class MCurl:
                     elif curl.auth is not None:
                         ret_pa, proxyauth_used = curl.get_proxyauth_used()
                         ret_nc, num_connects = curl.get_num_connects()
-                        if (
-                            ret_pa == libcurl.CURLE_OK
-                            and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE
-                        ):
+                        if ret_pa == libcurl.CURLE_OK and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE:
                             # Libcurl selected Negotiate but could not acquire a
                             # local Kerberos credential. It no longer retries as
                             # NTLM, and neither should mcurl. This is actionable

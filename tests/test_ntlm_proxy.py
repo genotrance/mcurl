@@ -267,6 +267,7 @@ def test_concurrent_multi_leg_auth_does_not_block(ntlm_proxy, connect):
     finally:
         multi.close()
 
+
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
 @pytest.mark.parametrize("ntlm_proxy", NTLM_VARIANTS, indirect=True)
 def test_success_resets_failures(ntlm_proxy, connect):
@@ -545,7 +546,9 @@ def _body_request(multi, url, method, body, auth="ANY", user=USER, easy=False):
 
 @pytest.mark.parametrize("easy", [False, True], ids=["multi", "easy"])
 @pytest.mark.parametrize("method", ["POST", "PUT"])
-@pytest.mark.parametrize("ntlm_proxy", [v.values[0] for v in NTLM_VARIANTS], ids=[v.id for v in NTLM_VARIANTS], indirect=True)
+@pytest.mark.parametrize(
+    "ntlm_proxy", [v.values[0] for v in NTLM_VARIANTS], ids=[v.id for v in NTLM_VARIANTS], indirect=True
+)
 def test_body_resent_across_auth_legs(ntlm_proxy, method, easy):
     # ANY sends the whole body on the first unauthenticated leg, so libcurl has
     # to rewind and resend it on the authenticated leg.
