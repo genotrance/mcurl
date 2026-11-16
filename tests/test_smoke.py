@@ -67,6 +67,26 @@ def test_libcurl_features():
     assert {"http", "https"} <= protocols, protocols
 
 
+REVISIT = "the bundled libcurl lost {}: revisit NTLM/Negotiate proxy auth support in mcurl and px before releasing"
+MACOS_NO_NTLM = "macOS wheels bundle Homebrew curl, which builds without NTLM since 8.21"
+AUTH_FEATURES = [
+    pytest.param("NTLM", id="NTLM", marks=pytest.mark.skipif(sys.platform == "darwin", reason=MACOS_NO_NTLM)),
+    pytest.param("SPNEGO", id="SPNEGO"),
+    pytest.param("KERBEROS5", id="KERBEROS5"),
+    pytest.param("GSSAPI", id="GSSAPI", marks=pytest.mark.skipif(sys.platform == "win32", reason="SSPI on Windows")),
+    pytest.param("SSPI", id="SSPI", marks=pytest.mark.skipif(sys.platform != "win32", reason="GSS-API off Windows")),
+]
+
+
+@pytest.mark.parametrize("feature", AUTH_FEATURES)
+def test_libcurl_auth_feature(feature):
+    # Proxy auth relies on these; the NTLM and Negotiate tests skip without them,
+    # so a libcurl that silently lost one must fail here, in CI and on every wheel.
+    # Linux and Windows bundle the jbb LibCURL_jll.jl build (NTLM since 8.20).
+    vinfo = mcurl.get_curl_vinfo()
+    assert vinfo.features & getattr(libcurl, f"CURL_VERSION_{feature}"), REVISIT.format(feature)
+
+
 def test_libcurl_version_matches_pyproject():
     # The wheel's libcurl must match the base version in pyproject.toml
     toml_path = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")

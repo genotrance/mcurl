@@ -254,10 +254,16 @@ proxy socket, the resulting fresh 407 is not treated as a rejected login.
 `do()` retries that request once with a fresh, non-reusable connection and
 counts only the retry's final result. Requests with a body are retried only
 when its read callback can rewind to offset zero; otherwise the result is
-inconclusive (503). The detection combines libcurl's `NTLM handshake
-rejected` diagnostic with `CURLINFO_NUM_CONNECTS > 1`; the latter counts only
-successful connections, so failed happy-eyeballs addresses cannot conceal a
-genuine 407.
+inconclusive (503). The detection uses getinfo only: a final 407 with
+`CURLINFO_PROXYAUTH_USED` NTLM and `CURLINFO_NUM_CONNECTS > 1`. The latter
+counts only successful connections, so failed happy-eyeballs addresses cannot
+conceal a genuine 407. 8.23.0.3 also required libcurl's `NTLM handshake
+rejected` text, which needed verbose output on every proxied transfer;
+8.23.0.4 dropped it. On every final 407 the suite reaches, both signals
+agree. The getinfo signal also fires when the last connection's 407 did not
+follow a type3 (for example a proxy that ends the handshake without an NTLM
+challenge). That costs at most one extra attempt, since the retry runs only
+once.
 
 When auth `ANY` selects Negotiate but no Kerberos credentials exist for the
 proxy name, `do()` returns 401 with `Negotiate has no Kerberos credentials for
@@ -265,7 +271,17 @@ this proxy name; libcurl no longer falls back to NTLM inside Negotiate;`.
 This configuration result does not count towards the proxy block threshold.
 The classification is evidence based, not on the selected method alone: the
 debug callback records whether a `Proxy-Authorization: Negotiate <token>`
-header was sent. A local failure is `CURLE_AUTH_ERROR` (libcurl's
+header was sent. No getinfo reports that, and GSS-API logs a local failure
+only as verbose text, so `do()` turns on `CURLOPT_VERBOSE` with the debug
+callback only while libcurl can pick Negotiate for the transfer (the proxy
+auth mask includes it), and it matches the sent header's raw bytes without
+decoding anything. Other transfers get verbose output only from
+`set_debug()`. On Windows the SSPI failure (`InitializeSecurityContext
+failed: SEC_E_...`) is libcurl's first error message, so it stays in the
+error buffer instead of `CONNECT tunnel failed, response 407`. A CONNECT 407
+with either message is the final answer, so HTTPS through a Negotiate proxy
+without Kerberos credentials gets this 401 instead of 502. Any other first
+error still marks a stale intermediate-leg 407 as inconclusive (px#268). A local failure is `CURLE_AUTH_ERROR` (libcurl's
 `gss_init_sec_context` or SSPI `AcquireCredentialsHandle` /
 `InitializeSecurityContext` failed, e.g. `SEC_E_NO_CREDENTIALS`) or a final
 407, either with Negotiate selected and no token sent. When a Negotiate token
@@ -514,3 +530,11 @@ mcurl.dprint = print
 
 All debug messages include the easy-handle hash for correlation in
 multi-threaded scenarios.
+
+libcurl text and headers are not always UTF-8. On Windows, SSPI and Schannel
+errors use the ANSI code page, and proxies may send any bytes. Debug output
+therefore decodes exactly the bytes libcurl passed, with `errors="replace"`.
+No libcurl callback lets an exception escape into CFFI: on Windows CFFI shows
+those in a "Python-CFFI error" message box. Instead, each callback logs the
+traceback through `dprint()` and returns the value that stops the transfer
+(continue, for the debug callback).

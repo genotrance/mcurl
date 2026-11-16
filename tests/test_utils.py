@@ -1,7 +1,6 @@
 import io
 import os
 import platform
-import sys
 
 import mcurl
 from mcurl import ffi, libcurl
@@ -57,25 +56,6 @@ def test_print_curl_version(capsys):
     assert len(output) > 0, "Expected output from print_curl_version()"
     # Should contain Python version
     assert any(platform.python_version() in o for o in output), f"Expected Python version in output: {output}"
-
-
-def test_check_deps():
-    # Check all dependencies are available
-    features = ["CURL_VERSION_SSL", "CURL_VERSION_SPNEGO", "CURL_VERSION_KERBEROS5"]
-    # NTLM removed from Homebrew curl 8.21+ on macOS; still present in jbb builds for Linux/Windows
-    if sys.platform != "darwin":
-        features.append("CURL_VERSION_NTLM")
-
-    if sys.platform == "win32":
-        features.append("CURL_VERSION_SSPI")
-    else:
-        features.append("CURL_VERSION_GSSAPI")
-
-    vinfo = libcurl.curl_version_info(libcurl.CURLVERSION_LAST - 1)
-    for feature in features:
-        bit = getattr(libcurl, feature)
-        avail = (bit & vinfo.features) > 0
-        assert avail, f"Error: {feature} not available in libcurl"
 
 
 def test_py2cstr():

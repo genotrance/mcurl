@@ -57,6 +57,7 @@ class _NtlmProxy(socketserver.ThreadingTCPServer):
         self.negotiate = negotiate
         self.drop_type2 = 0  # Handshakes to interrupt by closing before type2
         self.drop_after_type2 = 0  # Complete type2 legs to close immediately afterwards
+        self.reject_type3 = 0  # Valid type3 legs to reject as if the credentials were wrong
         self.drop_headers = 0  # Handshakes to cut off in the middle of the 407 headers
         self.refuse_after_close = refuse_after_close  # Stop listening after a 407 with Connection: close
         self.refused = threading.Event()  # Listener was closed and a fresh connection was refused
@@ -165,6 +166,12 @@ class _NtlmHandler(socketserver.StreamRequestHandler):
             # libcurl 8.23 resumes by sending type3 on a new connection.
             return None if close_after_type2 else False
         if kind == 3 and self.saw_type1 and _type3_user(msg) == USER:
+            with server.lock:
+                reject = server.reject_type3 > 0
+                server.reject_type3 -= reject
+        else:
+            reject = True
+        if not reject:
             with server.lock:
                 server.authenticated += 1
             return True
@@ -388,6 +395,81 @@ def test_type2_keepalive_drop_retries_on_fresh_connection(ntlm_proxy, connect):
         multi.close()
 
 
+@pytest.fixture
+def ntlm_retry_decisions(monkeypatch):
+    # (structured, text) retry decision per final 407: the resumed-handshake
+    # retry uses getinfo only (final 407, PROXYAUTH_USED NTLM, NUM_CONNECTS > 1)
+    # and must decide exactly as the "NTLM handshake rejected" text plus
+    # NUM_CONNECTS > 1 that 8.23.0.3 read from always-on verbose output
+    texts = {}
+    monkeypatch.setattr(mcurl, "dprint", lambda msg: texts.setdefault(msg.split(":", 1)[0], []).append(msg))
+    decisions = []
+    resumed = mcurl.MCurl._ntlm_resumed
+
+    def spy(curl):
+        new = resumed(curl)
+        seen = texts.pop(curl.easyhash, [])
+        old = any("NTLM handshake rejected" in t for t in seen) and curl.get_num_connects()[1] > 1
+        decisions.append((new, old))
+        return new
+
+    monkeypatch.setattr(mcurl.MCurl, "_ntlm_resumed", staticmethod(spy))
+    return decisions
+
+
+@pytest.mark.parametrize(
+    ("ntlm_proxy", "connect", "user", "decided"),
+    [
+        pytest.param({}, False, "wrong", [False], id="keepalive-wrong-http"),
+        pytest.param({}, True, "wrong", [False], id="keepalive-wrong-connect"),
+        pytest.param({"close_first": True}, False, "wrong", [True], id="close-wrong-http"),
+        pytest.param({"close_first": True}, True, "wrong", [True], id="close-wrong-connect"),
+        pytest.param({"close_first": True}, False, USER, [], id="close-success-http"),
+        pytest.param({"close_first": True}, True, USER, [], id="close-success-connect"),
+    ],
+    indirect=["ntlm_proxy"],
+)
+def test_ntlm_retry_signal_matches_libcurl_text(ntlm_proxy, ntlm_retry_decisions, connect, user, decided):
+    multi = mcurl.MCurl()
+    try:
+        curl = mcurl.Curl(CONNECT_TARGET, method="CONNECT") if connect else mcurl.Curl(TARGET)
+        if not connect:
+            curl.buffer()
+        assert curl.set_proxy(ntlm_proxy.url)
+        curl.set_auth(user, "pass", auth="ANY")
+        curl.set_debug()
+        ok = multi.do(curl)
+        assert ok is (user == USER), (curl.cerr, curl.resp, curl.errstr)
+        assert [new for new, _ in ntlm_retry_decisions] == decided
+        assert all(new == old for new, old in ntlm_retry_decisions), ntlm_retry_decisions
+        assert multi.failed.get(ntlm_proxy.url, 0) == (user != USER)
+    finally:
+        multi.close()
+
+
+@pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
+@pytest.mark.parametrize("ntlm_proxy", [{"close_first": True}], indirect=True)
+def test_ntlm_retry_on_fresh_connection_succeeds(ntlm_proxy, ntlm_retry_decisions, connect):
+    # A type3 rejected on the second connection of a handshake takes the retry,
+    # which succeeds on a fresh connection and counts nothing
+    multi = mcurl.MCurl()
+    try:
+        ntlm_proxy.reject_type3 = 1
+        curl = mcurl.Curl(CONNECT_TARGET, method="CONNECT") if connect else mcurl.Curl(TARGET)
+        if not connect:
+            curl.buffer()
+        assert curl.set_proxy(ntlm_proxy.url)
+        curl.set_auth(USER, "pass", auth="ANY")
+        curl.set_debug()
+        assert multi.do(curl), (curl.cerr, curl.resp, curl.errstr)
+        assert ntlm_retry_decisions == [(True, True)]
+        assert curl._ntlm_reconnect_retried
+        assert ntlm_proxy.authenticated == 1
+        assert multi.failed.get(ntlm_proxy.url, 0) == 0
+    finally:
+        multi.close()
+
+
 @pytest.mark.parametrize("connect", [False, True], ids=["http", "connect"])
 def test_final_407_counts_after_failed_connect_attempt(ntlm_proxy, connect):
     # The proxy host resolves first to a refused address, so the transfer
@@ -567,6 +649,98 @@ def test_negotiate_auth_error_classification(ntlm_proxy, monkeypatch, token_sent
             else:
                 assert curl.resp == 401
                 assert curl.errstr == mcurl.NEGOTIATE_NO_CREDENTIALS
+            assert multi.failed.get(ntlm_proxy.url, 0) == 0
+    finally:
+        multi.close()
+
+
+class _FakeConnectsCurl:
+    def __init__(self, ret, connects, used):
+        self.connects = (ret, connects)
+        self.used = (mcurl.libcurl.CURLE_OK, used)
+
+    def get_num_connects(self):
+        return self.connects
+
+    def get_proxyauth_used(self):
+        return self.used
+
+
+@pytest.mark.parametrize(
+    ("ret", "connects", "used", "resumed"),
+    [
+        (0, 2, "NTLM", True),
+        (0, 3, "NTLM", True),
+        (0, 1, "NTLM", False),
+        (0, 2, "NEGOTIATE", False),
+        (0, 2, "BASIC", False),
+        (1, 2, "NTLM", False),
+    ],
+    ids=["ntlm-2", "ntlm-3", "one-connection", "negotiate", "basic", "getinfo-error"],
+)
+def test_ntlm_resumed_classification(ret, connects, used, resumed):
+    used = getattr(mcurl.libcurl, f"CURLAUTH_{used}")
+    assert mcurl.MCurl._ntlm_resumed(_FakeConnectsCurl(ret, connects, used)) is resumed
+
+
+# On Windows libcurl's SSPI Negotiate failure is a failf(), and failf() fills
+# CURLOPT_ERRORBUFFER only once, so the final "CONNECT tunnel failed, response
+# 407" never reaches it (genotrance/px#288). Linux GSS-API logs the failure with
+# infof() only, so these tests put the SSPI text into the buffer themselves.
+SSPI_NO_CREDENTIALS = (
+    b"InitializeSecurityContext failed: SEC_E_NO_CREDENTIALS (0x8009030e) - "
+    b"Aucune information d\x92identification n\x92est disponible"
+).decode("utf-8", "replace")
+
+
+@pytest.mark.parametrize(
+    ("errbuf", "conclusive"),
+    [
+        (SSPI_NO_CREDENTIALS, True),
+        ("CompleteAuthToken failed: SEC_E_INTERNAL_ERROR (0x80090304) - x", True),
+        ("SSPI: could not get auth info", True),
+        ("CONNECT tunnel failed, response 407", True),
+        ("Failed to connect to 127.0.0.1 port 1 after 0 ms: Could not connect to server", False),
+        ("", False),
+    ],
+    ids=["sspi-no-credentials", "sspi-complete", "sspi-auth-info", "tunnel-407", "failed-connect", "empty"],
+)
+def test_connect_407_classified_from_error_buffer(ntlm_proxy, monkeypatch, errbuf, conclusive):
+    # A CONNECT 407 counts if libcurl's first failure was the tunnel 407 or an
+    # SSPI auth failure; any other first failure leaves an intermediate leg's
+    # 407 in HTTP_CONNECTCODE (px#268) and stays inconclusive
+    monkeypatch.setattr(mcurl.Curl, "get_errorbuffer", lambda self: errbuf)
+    multi = mcurl.MCurl()
+    try:
+        admitted, ok, curl = _request(multi, ntlm_proxy.url, True, user="wrong")
+        assert admitted and not ok
+        assert curl.get_connect_response() == (0, 407)
+        if conclusive:
+            assert curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
+            assert multi.failed[ntlm_proxy.url] == 1
+        else:
+            assert curl.resp == 502, (curl.cerr, curl.resp, curl.errstr)
+            assert multi.failed.get(ntlm_proxy.url, 0) == 0
+    finally:
+        multi.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows SSPI handling of the synthetic Negotiate challenge is not validated here",
+)
+@pytest.mark.parametrize("ntlm_proxy", [{"negotiate": True}], indirect=True)
+def test_connect_negotiate_without_credentials_after_sspi_failf(ntlm_proxy, monkeypatch):
+    # Windows HTTPS through a Negotiate proxy without a Kerberos ticket: the
+    # auth diagnosis, not 502 "Could not connect to server"
+    monkeypatch.setattr(mcurl.Curl, "get_errorbuffer", lambda self: SSPI_NO_CREDENTIALS)
+    multi = mcurl.MCurl()
+    try:
+        for _ in range(multi.failure_threshold + 1):
+            admitted, ok, curl = _request(multi, ntlm_proxy.url, True)
+            assert admitted and not ok
+            assert curl.resp == 401, (curl.cerr, curl.resp, curl.errstr)
+            assert curl.errstr == mcurl.NEGOTIATE_NO_CREDENTIALS
             assert multi.failed.get(ntlm_proxy.url, 0) == 0
     finally:
         multi.close()

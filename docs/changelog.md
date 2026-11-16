@@ -2,10 +2,14 @@
 
 ---
 
-## Unreleased
+## v8.23.0.4 — TBD
 
 ### Bug fixes
 - `auth=ANY` no longer falls back from Negotiate to NTLM; missing Kerberos credentials report a specific error and do not block the proxy (genotrance/px#288).
+- On Windows, HTTPS through a Negotiate proxy without Kerberos credentials now reports that auth error instead of 502 (genotrance/px#288).
+- libcurl callbacks no longer raise on non-UTF-8 text such as localized Windows errors, so the "Python-CFFI error" dialog no longer appears (genotrance/px#289).
+- libcurl verbose output is enabled only by `set_debug()`, or while Negotiate can be picked for a proxied transfer (genotrance/px#289).
+- A failing read, seek or progress callback now aborts the transfer instead of silently ending the upload.
 
 ---
 
