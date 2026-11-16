@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 
 try:
     import _cffi_backend
@@ -41,13 +42,20 @@ KEEPALIVE_INTERVAL = 10
 KEEPALIVE_COUNT = 3
 ERROR_BUFFER_SIZE = 256  # CURL_ERROR_SIZE
 TUNNEL_407 = "CONNECT tunnel failed, response 407"  # libcurl message for a final CONNECT 407
-NTLM_RECONNECT_REJECTED = "NTLM handshake rejected"
+# libcurl's SSPI Negotiate failf() messages (vauth/spnego_sspi.c). failf() fills the
+# error buffer only once, so on Windows one of these replaces TUNNEL_407 there
+SSPI_AUTH_FAILURES = (
+    "SSPI: could not get auth info",
+    "InitializeSecurityContext failed: ",
+    "CompleteAuthToken failed: ",
+)
 # do() error text for CURLE_SEND_FAIL_REWIND (inconclusive, not an auth failure)
 REWIND_ERROR = (
     "Request body cannot be resent: it was sent on a proxy authentication leg "
     "and the body source cannot rewind (proxy ignored Expect: 100-continue?); "
 )
-NEGOTIATE_TOKEN_SENT = re.compile(r"proxy-authorization:\s*negotiate\s+\S", re.IGNORECASE)
+# Matched on the raw bytes of sent headers, which are never decoded unless debugging
+NEGOTIATE_TOKEN_SENT = re.compile(rb"^proxy-authorization:[ \t]*negotiate[ \t]+\S", re.IGNORECASE | re.MULTILINE)
 NEGOTIATE_NO_CREDENTIALS = (
     "Negotiate has no Kerberos credentials for this proxy name; libcurl no longer falls back to NTLM inside Negotiate; "
 )
@@ -169,13 +177,26 @@ def getauth(auth):
 
 def yield_msgs(data, size):
     "Generator for curl debug messages"
-    raw = ffi.string(data)[:size]
+    # libcurl's data is exactly size bytes, not NUL-terminated, and not always
+    # UTF-8 (Windows error text is in the ANSI code page, headers are raw bytes)
+    raw = ffi.unpack(data, size)
     for line in raw.split(b"\r\n"):
         if line and not line.isspace():
-            yield line.decode("utf-8")
+            yield line.decode("utf-8", "replace")
 
 
-@ffi.def_extern()
+def _callback_error(name):
+    "Return a CFFI onerror handler: an exception must never escape into libcurl"
+
+    def onerror(exc_type, exc_value, tb):
+        # Returning None makes CFFI return the def_extern error value
+        with contextlib.suppress(Exception):
+            dprint(f"Error in {name}: " + "".join(traceback.format_exception(exc_type, exc_value, tb)).rstrip())
+
+    return onerror
+
+
+@ffi.def_extern(onerror=_callback_error("debug_callback"))
 def debug_callback(easy, infotype, data, size, userp):
     "Prints out curl debug info and headers sent/received"
 
@@ -184,35 +205,29 @@ def debug_callback(easy, infotype, data, size, userp):
     curl = MCURL.handles.get(easyhash)
     if curl is None:
         return libcurl.CURLE_OK
-    if infotype == libcurl.CURLINFO_TEXT:
-        for msg in yield_msgs(data, size):
-            if NTLM_RECONNECT_REJECTED in msg:
-                curl._ntlm_reconnect_rejected = True
-            if curl._debug:
-                dprint(easyhash + ": Curl info: " + sanitized(msg))
+    if infotype == libcurl.CURLINFO_HEADER_OUT and curl._negotiate_watch and not curl._negotiate_token_sent:
+        # Evidence that a Negotiate token reached the proxy: a 407 after
+        # it is a server rejection, not a missing local credential
+        if NEGOTIATE_TOKEN_SENT.search(ffi.unpack(data, size)):
+            curl._negotiate_token_sent = True
+    if not curl._debug:
         return libcurl.CURLE_OK
-    if infotype == libcurl.CURLINFO_HEADER_IN:
+    if infotype == libcurl.CURLINFO_TEXT:
+        prefix = easyhash + ": Curl info: "
+    elif infotype == libcurl.CURLINFO_HEADER_IN:
         prefix = easyhash + ": Received header <= "
     elif infotype == libcurl.CURLINFO_HEADER_OUT:
         prefix = easyhash + ": Sent header => "
-        if not curl._negotiate_token_sent:
-            # Evidence that a Negotiate token reached the proxy: a 407 after
-            # it is a server rejection, not a missing local credential
-            for msg in yield_msgs(data, size):
-                if NEGOTIATE_TOKEN_SENT.match(msg):
-                    curl._negotiate_token_sent = True
-                    break
     else:
         return libcurl.CURLE_OK
 
-    if curl._debug:
-        for msg in yield_msgs(data, size):
-            dprint(prefix + sanitized(msg))
+    for msg in yield_msgs(data, size):
+        dprint(prefix + sanitized(msg))
 
     return libcurl.CURLE_OK
 
 
-@ffi.def_extern()
+@ffi.def_extern(error=libcurl.CURL_READFUNC_ABORT, onerror=_callback_error("read_callback"))
 def read_callback(buffer, size, nitems, userdata):
     tsize = size * nitems
     curl = MCURL.handles[cvp2pystr(userdata)]
@@ -252,7 +267,7 @@ def read_callback(buffer, size, nitems, userdata):
     return tsize
 
 
-@ffi.def_extern()
+@ffi.def_extern(onerror=_callback_error("write_callback"))
 def write_callback(buffer, size, nitems, userdata):
     tsize = size * nitems
     curl = MCURL.handles[cvp2pystr(userdata)]
@@ -309,12 +324,12 @@ def _is_407_status_line(data):
     return len(parts) >= 2 and parts[0].startswith(b"HTTP/") and parts[1] == b"407"
 
 
-@ffi.def_extern()
+@ffi.def_extern(onerror=_callback_error("header_callback"))
 def header_callback(buffer, size, nitems, userdata):
     tsize = size * nitems
     curl = MCURL.handles[cvp2pystr(userdata)]
     if tsize > 0:
-        data = bytes(ffi.string(buffer)[:tsize])
+        data = ffi.unpack(buffer, tsize)
         if curl.suppress:
             if data == b"\r\n":
                 # Stop suppressing headers since done
@@ -351,7 +366,7 @@ def header_callback(buffer, size, nitems, userdata):
     return 0
 
 
-@ffi.def_extern()
+@ffi.def_extern(error=1, onerror=_callback_error("xferinfo_callback"))
 def xferinfo_callback(clientp, dltotal, dlnow, ultotal, ulnow):
     curl = MCURL.handles[cvp2pystr(clientp)]
     if curl._xferinfo_fn is not None:
@@ -359,7 +374,7 @@ def xferinfo_callback(clientp, dltotal, dlnow, ultotal, ulnow):
     return 0
 
 
-@ffi.def_extern()
+@ffi.def_extern(error=libcurl.CURL_SEEKFUNC_FAIL, onerror=_callback_error("seek_callback"))
 def seek_callback(clientp, offset, origin):
     curl = MCURL.handles[cvp2pystr(clientp)]
     return curl._seek(offset, origin)
@@ -439,8 +454,9 @@ class Curl:
     # Proxy for which this handle holds the auth retry probe slot
     _probe_proxy = None
     _stopped = False
-    _ntlm_reconnect_rejected = False
     _ntlm_reconnect_retried = False
+    # do() turned on VERBOSE + debug_callback to watch for a sent Negotiate token
+    _negotiate_watch = False
     _negotiate_token_sent = False
     _debug = False
 
@@ -635,8 +651,8 @@ class Curl:
 
         self.cerr = libcurl.CURLE_OK
         self._stopped = False
-        self._ntlm_reconnect_rejected = False
         self._ntlm_reconnect_retried = False
+        self._negotiate_watch = False
         self._negotiate_token_sent = False
         self._debug = False
         self.done = False
@@ -1259,8 +1275,9 @@ class Curl:
         new.sentheaders = False
         new.suppress = False
         new._stopped = False
-        new._ntlm_reconnect_rejected = False
         new._ntlm_reconnect_retried = False
+        # curl_easy_duphandle() copies VERBOSE and DEBUGFUNCTION
+        new._negotiate_watch = self._negotiate_watch
         new._negotiate_token_sent = False
         new._debug = False
         new.is_connect = False
@@ -1525,7 +1542,7 @@ class Curl:
         self._cache_proxy_auth()
 
 
-@ffi.def_extern()
+@ffi.def_extern(error=-1, onerror=_callback_error("socket_callback"))
 def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
     # libcurl socket callback: add/remove actions for socket events
     del easy, userp, socketp
@@ -1545,7 +1562,7 @@ def socket_callback(easy, sock_fd, ev_bitmask, userp, socketp):
     return libcurl.CURLE_OK
 
 
-@ffi.def_extern()
+@ffi.def_extern(error=-1, onerror=_callback_error("multi_timer_callback"))
 def multi_timer_callback(multi, timeout_ms, userp):
     # libcurl gives a relative timeout; retain its monotonic deadline so time
     # spent handling another event cannot make a later select() oversleep.
@@ -2056,17 +2073,35 @@ class MCurl:
         ret, proxyauth_used = curl.get_proxyauth_used()
         return ret == libcurl.CURLE_OK and proxyauth_used == libcurl.CURLAUTH_NEGOTIATE
 
+    @staticmethod
+    def _watch_negotiate(curl: Curl):
+        "Watch sent headers for a Negotiate token only while libcurl can pick Negotiate for this transfer"
+        # No getinfo says whether a token was sent, and GSS-API reports a local
+        # failure with infof() only, so this needs the debug channel. The
+        # callback matches raw bytes and decodes nothing unless debugging.
+        watch = curl.proxy is not None and curl.auth is not None and bool(curl.auth & libcurl.CURLAUTH_NEGOTIATE)
+        if watch != curl._negotiate_watch and not curl._debug:
+            libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_VERBOSE, py2cbool(watch))
+            func = libcurl.debug_callback if watch else ffi.NULL
+            libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_DEBUGFUNCTION, func)
+        curl._negotiate_watch = watch
+        curl._negotiate_token_sent = False
+
+    @staticmethod
+    def _ntlm_resumed(curl: Curl):
+        "True if a final 407 followed an NTLM handshake that libcurl resumed on a new connection"
+        # NUM_CONNECTS counts successful connections only, unlike failed
+        # happy-eyeballs addresses, and NTLM is connection-bound
+        ret, num_connects = curl.get_num_connects()
+        if ret != libcurl.CURLE_OK or num_connects < 2:
+            return False
+        ret, proxyauth_used = curl.get_proxyauth_used()
+        return ret == libcurl.CURLE_OK and proxyauth_used == libcurl.CURLAUTH_NTLM
+
     def do(self, curl: Curl):
         "Add a Curl handle and perform until completion; returns True on success"
         while True:
-            if curl.proxy is not None and curl.auth is not None:
-                # CURLINFO_NUM_CONNECTS says only that a second successful
-                # connection existed. Keep libcurl's precise NTLM diagnostic
-                # too, so a normal close-and-restart handshake still counts.
-                curl._ntlm_reconnect_rejected = False
-                curl._negotiate_token_sent = False
-                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_VERBOSE, py2cbool(True))
-                libcurl.curl_easy_setopt(curl.easy, libcurl.CURLOPT_DEBUGFUNCTION, libcurl.debug_callback)
+            self._watch_negotiate(curl)
             if not curl.is_easy:
                 self.add(curl)
                 while True:
@@ -2149,9 +2184,14 @@ class MCurl:
                 ret, codep = curl.get_response()
                 if curl.cerr != libcurl.CURLE_OK:
                     ret, codep = curl.get_connect_response()
-                    if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or TUNNEL_407 not in curl.get_errorbuffer():
+                    errbuf = curl.get_errorbuffer()
+                    if curl.cerr != libcurl.CURLE_COULDNT_CONNECT or (
+                        TUNNEL_407 not in errbuf and not errbuf.startswith(SSPI_AUTH_FAILURES)
+                    ):
                         # CURLINFO_OS_ERRNO and HTTP_CONNECTCODE persist across the
-                        # legs of a transfer so libcurl's last error message decides
+                        # legs of a transfer so libcurl's error message decides. It
+                        # holds the first failure only: on Windows an SSPI Negotiate
+                        # failure there means the CONNECT 407 was final.
                         aborted = True
                 if not aborted and ret == libcurl.CURLE_OK and codep == 407:
                     # Proxy authentication required
@@ -2161,7 +2201,6 @@ class MCurl:
                         curl.resp = 502
                         curl.errstr += "Truncated proxy response; "
                     elif curl.auth is not None:
-                        ret_nc, num_connects = curl.get_num_connects()
                         if self._negotiate_local_failure(curl):
                             # Libcurl selected Negotiate but sent no token: it
                             # could not acquire a local Kerberos credential. It
@@ -2169,17 +2208,9 @@ class MCurl:
                             # mcurl. A rejected token is a normal auth failure.
                             curl.resp = 401
                             curl.errstr = NEGOTIATE_NO_CREDENTIALS
-                        elif (
-                            not curl._ntlm_reconnect_retried
-                            and ret_nc == libcurl.CURLE_OK
-                            and num_connects > 1
-                            and curl._ntlm_reconnect_rejected
-                        ):
-                            # NUM_CONNECTS counts successful connections only,
-                            # unlike failed happy-eyeballs addresses. The text
-                            # confirms libcurl resumed a connection-bound NTLM
-                            # handshake rather than starting one after a normal
-                            # Connection: close response.
+                        elif not curl._ntlm_reconnect_retried and self._ntlm_resumed(curl):
+                            # Type3 may have gone out on a new connection after
+                            # the type2 one dropped: retry once on a fresh one
                             retry_after_reconnect = True
                             if curl._content_length and curl._seek(0, 0) != libcurl.CURL_SEEKFUNC_OK:
                                 retry_after_reconnect = False
