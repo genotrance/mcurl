@@ -97,8 +97,11 @@ mirror (the manylinux i686 image's vault host stopped resolving) no longer
 fails the i686 build when headers already exist.
 
 cibuildwheel is configured in `pyproject.toml` under `[tool.cibuildwheel]`.
-The build uses `build[uv]` as the frontend for speed. Only the `pypy` enable
-group is on, so PyPy 3.11 and 3.12 are built and the PyPy-EOL versions are not.
+The build uses `build[uv]` as the frontend for speed, except for the i686 job
+in `build.yml`. The current uv release panics while creating a Unix socket
+under that job's emulated 32-bit manylinux container, so that job uses
+`build`'s pip installer instead. Only the `pypy` enable group is on, so PyPy
+3.11 and 3.12 are built and the PyPy-EOL versions are not.
 The skip list keeps PyPy off macOS and Windows, so PyPy wheels are Linux-only.
 
 Several configurations are skipped because they are unsupported or broken:

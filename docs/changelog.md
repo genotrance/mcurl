@@ -2,7 +2,7 @@
 
 ---
 
-## v8.23.0.4 — TBD
+## v8.23.0.4 — 2026-11-16
 
 ### Bug fixes
 - `auth=ANY` no longer falls back from Negotiate to NTLM; missing Kerberos credentials report a specific error and do not block the proxy (genotrance/px#288).
