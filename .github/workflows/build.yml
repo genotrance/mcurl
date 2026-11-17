@@ -103,15 +103,21 @@ jobs:
           - os: ubuntu-24.04
             arch: i686
             cibw_archs: i686
+            # uv panics under the emulated 32-bit manylinux container.
+            # Use build's pip installer there; all other builds keep uv.
+            cibw_build_frontend: build
           - os: ubuntu-24.04-arm
             arch: aarch64
             cibw_archs: aarch64
+            cibw_build_frontend: build[uv]
           - os: windows-latest
             arch: x86_64
             cibw_archs: AMD64
+            cibw_build_frontend: build[uv]
           - os: macos-15
             arch: arm64
             cibw_archs: arm64
+            cibw_build_frontend: build[uv]
 
     steps:
       - uses: actions/checkout@v7
@@ -135,6 +141,7 @@ jobs:
         uses: pypa/cibuildwheel@v4.3.5
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BUILD_FRONTEND: ${{ matrix.cibw_build_frontend }}
 
       - uses: actions/upload-artifact@v7
         with:
