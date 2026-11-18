@@ -236,8 +236,10 @@ def get_preprocessor(sfile, incs=[], defines=[], recurse=False):
         f"{sfile}",
     ])
 
-    # Run preprocessor
-    p = subprocess.run(" ".join(args), capture_output=True, text=True, shell=True)
+    # Run preprocessor. shell=True is needed because some of the hardcoded
+    # defines below are quoted for the shell; args are fixed gcc flags plus
+    # build-time header paths, never user input.
+    p = subprocess.run(" ".join(args), capture_output=True, text=True, shell=True)  # nosec B602
     outp = p.stdout.replace("\\\\", os.sep).splitlines()
     if len(p.stderr) != 0:
         print(p.stderr)

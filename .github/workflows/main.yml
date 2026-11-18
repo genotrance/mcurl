@@ -18,6 +18,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -88,9 +91,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -113,7 +118,9 @@ jobs:
         shell: bash
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Ensure Homebrew libcurl matches pyproject (macOS)
         if: runner.os == 'macOS'
@@ -145,7 +152,9 @@ jobs:
           echo "DYLD_LIBRARY_PATH=${DIRS}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Run tests
-        run: uv run --locked python -m pytest tests ${{ needs.plan.outputs.pytest_args }} --cov --cov-config=pyproject.toml --cov-report=xml
+        env:
+          PYTEST_ARGS: ${{ needs.plan.outputs.pytest_args }}
+        run: uv run --locked python -m pytest tests $PYTEST_ARGS --cov --cov-config=pyproject.toml --cov-report=xml
 
   tests-windows:
     runs-on: windows-latest
@@ -156,13 +165,15 @@ jobs:
     name: test windows ${{ matrix.python-version }}
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Build and test wheels (Windows)
-        uses: pypa/cibuildwheel@v4.3.5
+        uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
         env:
           CIBW_ARCHS: AMD64
           CIBW_BUILD: ${{ matrix.cibw_build }}
@@ -183,13 +194,15 @@ jobs:
     name: test linux ${{ matrix.arch }} ${{ matrix.python-version }}
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Build and test wheels (Linux ${{ matrix.arch }})
-        uses: pypa/cibuildwheel@v4.3.5
+        uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.cibw_build }}
@@ -208,13 +221,15 @@ jobs:
     name: test musllinux ${{ matrix.arch }} ${{ matrix.python-version }}
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Build and test wheels (musllinux ${{ matrix.arch }})
-        uses: pypa/cibuildwheel@v4.3.5
+        uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.cibw_build }}

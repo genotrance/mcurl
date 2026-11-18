@@ -154,6 +154,8 @@ ignore = [
 "mcurl/gen.py" = ["B006", "B904", "C901", "E721", "E722", "F841", "S102", "S110", "S112", "S307", "S602", "S603", "S607", "SIM105", "TRY002", "TRY003", "UP031", "RUF005"]
 # __init__.py has complex proxy/tunnel logic and cffi patterns - acceptable
 "mcurl/__init__.py" = ["B904", "C901", "F401", "F841", "RUF003", "SIM102", "SIM108", "SIM210", "TRY002", "TRY003", "TRY201", "UP031"]
+# CI-only build helper: fixed pkg-config/gcc invocations, not user input
+".github/codeql/build_ccpp.py" = ["S603", "S607"]
 
 [tool.ruff.format]
 preview = true
