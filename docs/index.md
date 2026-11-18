@@ -10,7 +10,7 @@ high-level `Curl` (easy) and `MCurl` (multi) interfaces via
 | File | Description |
 |------|-------------|
 | [build.md](build.md) | Build system: `pyproject.toml`, `setup.py`, cffi, cibuildwheel |
-| [ci.md](ci.md) | GitHub Actions workflows: CI, build wheels, check-upstream |
+| [ci.md](ci.md) | GitHub Actions workflows: CI, build wheels, check-upstream, security checks |
 | [api.md](api.md) | `Curl` and `MCurl` class reference, utility functions |
 | [changelog.md](changelog.md) | Release history |
 | [testing.md](testing.md) | Test suite layout, running tests, fixtures |

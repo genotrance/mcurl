@@ -286,3 +286,88 @@ checking tools (`pre-commit`, `ruff`, `mypy`). `uv sync` installs them all.
 Coverage is configured in `pyproject.toml` under `[tool.coverage.*]`. Branch
 coverage is enabled and scoped to the `mcurl` package. Empty files are skipped
 in reports.
+
+---
+
+## Security checks locally
+
+`security.yml` and `codeql.yml` ([docs/ci.md](ci.md#security-checks)) can all
+run locally; versions below match the workflows' pinned `env:` block (bump
+both together). None need a GitHub token.
+
+```sh
+# zizmor (installed as a uv tool or via uvx; either works)
+uvx "zizmor==1.32.0" --no-progress --no-exit-codes .github/workflows .github/actions .github/dependabot.yml
+uvx "zizmor==1.32.0" --no-progress --min-severity=high --format=github .github/workflows .github/actions .github/dependabot.yml
+
+# actionlint (downloaded binary, SHA-256 pinned the same way as the workflow)
+curl -fsSL -o /tmp/actionlint.tar.gz \
+  https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum --check -
+tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+/tmp/actionlint -color
+
+# gitleaks (downloaded binary, same SHA-256 pin as the workflow)
+curl -fsSL -o /tmp/gitleaks.tar.gz \
+  https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum --check -
+tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+/tmp/gitleaks git --no-banner --redact --exit-code 1 .          # full history
+/tmp/gitleaks dir --no-banner --redact --exit-code 1 .          # working tree, including uncommitted changes
+
+# Bandit
+uvx "bandit==1.9.4" -r mcurl setup.py tools --exit-zero          # every finding
+uvx "bandit==1.9.4" -r mcurl --severity-level high --confidence-level high --quiet  # the failing subset
+```
+
+### CodeQL CLI
+
+The [CodeQL CLI](https://github.com/github/codeql-cli-binaries) is a separate
+download from the `codeql-action` used in `codeql.yml` (the Action wraps the
+CLI and uploads results to GitHub; the CLI alone is enough to reproduce a scan
+locally). It needs query packs downloaded once per language:
+
+```sh
+# Install (pick the matching platform asset)
+curl -fsSL -o /tmp/codeql.zip \
+  https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-linux64.zip
+python3 -c "import zipfile; zipfile.ZipFile('/tmp/codeql.zip').extractall('/tmp')"
+# python3's zipfile does not restore the Unix executable bit; restore it from
+# the archive's own permission bits before running anything under /tmp/codeql
+python3 - <<'PY'
+import zipfile, os
+with zipfile.ZipFile("/tmp/codeql.zip") as z:
+    for info in z.infolist():
+        perm = (info.external_attr >> 16) & 0o777
+        path = "/tmp/" + info.filename
+        if perm and os.path.exists(path):
+            os.chmod(path, perm)
+PY
+/tmp/codeql/codeql pack download codeql/python-queries codeql/cpp-queries
+
+# Python: build-mode none, no compilation needed
+/tmp/codeql/codeql database create /tmp/python-db --language=python --source-root=. --overwrite
+/tmp/codeql/codeql database analyze /tmp/python-db \
+  ~/.codeql/packages/codeql/python-queries/*/codeql-suites/python-security-extended.qls \
+  --format=sarif-latest --output=/tmp/python-results.sarif
+
+# C/C++: build the cffi extension against the distro libcurl dev headers
+# first (apt-get install -y libcurl4-openssl-dev), matching codeql.yml's
+# manual build-mode step, then point --command at the same compile cffi ran:
+python3 -m venv /tmp/codeql-venv
+/tmp/codeql-venv/bin/pip install --quiet setuptools==84.2.1 cffi==2.1.1
+/tmp/codeql-venv/bin/python .github/codeql/build_ccpp.py
+/tmp/codeql/codeql database create /tmp/ccpp-db --language=cpp \
+  --command="/tmp/codeql-venv/bin/python .github/codeql/build_ccpp.py" --overwrite
+/tmp/codeql/codeql database analyze /tmp/ccpp-db \
+  ~/.codeql/packages/codeql/cpp-queries/*/codeql-suites/cpp-security-extended.qls \
+  --format=sarif-latest --output=/tmp/ccpp-results.sarif
+```
+
+Without root to install `libcurl4-openssl-dev`, download the `.deb` with
+`apt-get download libcurl4-openssl-dev` and extract it with
+`dpkg-deb -x <package>.deb <dir>` (works unprivileged); point `pkg-config`
+at the extracted `pkgconfig` directory via `PKG_CONFIG_PATH`, and make sure
+the real runtime `libcurl.so.<N>` the extracted `.so` symlink points at is
+resolvable (the base `libcurl4`/`libcurl4t64` runtime package, not the `-dev`
+package, usually already provides it) before linking.

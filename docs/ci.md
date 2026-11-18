@@ -4,13 +4,15 @@
 
 ## Overview
 
-Three workflows power the CI/CD pipeline:
+Five workflows power the CI/CD pipeline:
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | CI | `main.yml` | push to `main`/`devel`/`working`, PRs (fast lane); weekly cron Sat 03:00 UTC and manual dispatch with `full` (full lane) | Code quality + test matrix |
 | Build wheels | `build.yml` | push to `main`, manual dispatch | Build + publish to PyPI, then merge `main` back into `devel` |
 | Check upstream | `check-upstream.yml` | weekly cron (Mon 18:00 UTC), manual | Commit version bump and release new libcurl |
+| Security | `security.yml` | push to `devel`/`main`, every pull request | zizmor, actionlint, dependency review, gitleaks, Bandit |
+| CodeQL | `codeql.yml` | push to `devel`/`main`, every pull request, weekly cron Mon 05:17 UTC | CodeQL `security-extended` analysis (Python and C/C++) |
 
 ---
 
@@ -527,6 +529,181 @@ artifacts but logs instead of uploading or tagging.
   bypass for GitHub Actions or a deploy key/PAT secret.
 - The PyPI trusted publisher stays configured for `build.yml` (the build is
   dispatched, not called as a reusable workflow, so no PyPI change is needed).
+
+---
+
+## Security checks
+
+Every pull request (including fork pull requests) and every push to `devel`
+and `main` runs `security.yml` and `codeql.yml`. Both use only `pull_request`
+and `push` triggers, never `pull_request_target` or `workflow_run`, so pull
+request code runs without secrets and with a read-only token.
+
+### Hardening of all workflows
+
+- Every action in every workflow and the composite action
+  (`.github/actions/setup-python-env`) is pinned by full commit SHA with a
+  trailing `# vX.Y.Z` comment. Dependabot's `github-actions` ecosystem
+  (`.github/dependabot.yml`) updates the SHA and the comment together.
+- Workflows default to `permissions: contents: read` at the top level; jobs
+  that push, publish or dispatch raise only what they need (`build.yml`'s
+  `publish` job: `id-token: write` + `contents: write`; its `back-merge` job
+  and `check-upstream.yml`'s `prepare-and-dispatch` job: `contents: write`;
+  `prepare-and-dispatch` also needs `actions: write` to dispatch `build.yml`).
+- `actions/checkout` uses `persist-credentials: false` except in the three
+  jobs that push with the job token (`build.yml`'s `publish` job: the release
+  tag; `build.yml`'s `back-merge` job: `devel` or a conflict branch;
+  `check-upstream.yml`'s `prepare-and-dispatch` job: the version bump commit
+  on `main`). Each keeps `persist-credentials: true` with an inline
+  `# zizmor: ignore[artipacked]` reason placed inside the `with:` block (zizmor
+  requires the comment inside the flagged span, not on the line above the
+  step).
+- Expressions that come from workflow inputs, job outputs or `github.event.*`
+  never expand inside `run:` scripts; they are passed through `env:` instead
+  (template injection).
+- Remaining zizmor findings are two low-severity `self-repository` hints
+  (`uses: ./.github/actions/setup-python-env` could use the newer `$/...`
+  syntax); they are reported, not failing, and kept until actionlint supports
+  the new syntax (same choice px and quickjs-ng made).
+
+### `security.yml` jobs
+
+The job names below are the check names to require in branch protection
+(`dependency-review` only runs, and is only required, for pull requests).
+
+| Job | Checks | Fails on |
+|-----|--------|----------|
+| `zizmor` | zizmor over `.github/workflows`, `.github/actions` and `dependabot.yml`; the log lists every finding | High severity findings |
+| `actionlint` | actionlint (with the runner's shellcheck) over every workflow | Any finding |
+| `dependency-review` | `actions/dependency-review-action` on the pull request's dependency changes | High or critical vulnerabilities in added dependencies |
+| `gitleaks` | gitleaks over the pull request's commits, or the pushed range on a push (whole history for a new branch) | Any finding |
+| `bandit` | Bandit on `mcurl/` (report-only: `setup.py` and `tools/` too) | High severity with high confidence, `mcurl/` only |
+
+No `.gitleaks.toml` is used: a local scan of the full `devel` history and
+working tree found no leaks and no fixture trips the default ruleset. Add a
+narrow, commented allowlist only if a test fixture ever does.
+
+### CodeQL (`codeql.yml`)
+
+CodeQL uses *advanced setup* (a workflow in the repository) instead of
+GitHub's default setup: default setup does not analyse pull requests from
+forks, leaving the required `Analyze (python)`/`Analyze (c-cpp)` checks
+unreported and blocking those contributions, and advanced setup lets the C
+analysis compile the generated extension. The matrix renders the two checks to
+require: `Analyze (python)` and `Analyze (c-cpp)`. Both run the
+`security-extended` query suite.
+
+Python uses `build-mode: none` (no code executes). C/C++ uses
+`build-mode: manual`: `.github/codeql/build_ccpp.py` loads `mcurl/gen.py` by
+file path (not `import mcurl.gen`, which would require the
+not-yet-built `_libcurl_cffi` extension that `mcurl/__init__.py` imports),
+resolves the distro `libcurl4-openssl-dev` package's headers and library
+directory with `pkg-config`, and calls `gen.py`'s own
+`get_preprocessor`/`gen_callbacks`/`cffi_prep` to generate and compile
+`_libcurl_cffi.c` — the same codegen path the real wheel build uses, just
+against the distro libcurl instead of the jbb-downloaded one (CodeQL only
+needs a compilable translation unit to trace, not the exact shipped ABI).
+This produces a real ~16,500-line generated C file for CodeQL to analyze, not
+just vendored or boilerplate code, and it was kept after confirming it builds
+cleanly in CI's exact environment (locally with a sandboxed, non-root
+extraction of the `libcurl4-openssl-dev` package, since this repository has no
+C sources of its own to analyze otherwise).
+
+The `analyze` job has the least permissions needed to upload code-scanning
+results: `contents: read` and `security-events: write`; no `actions: read`
+permission is needed for this public repository. Its two displayed job names
+must remain exactly `Analyze (python)` and `Analyze (c-cpp)` so branch
+protection can require them. Keep CodeQL default setup unconfigured: GitHub
+rejects advanced-setup uploads while default setup is enabled.
+
+### Bumping tool versions
+
+`security.yml`'s top-level `env:` pins every tool: `ZIZMOR_VERSION` and
+`BANDIT_VERSION` (installed through `uvx`, no separate hash needed), plus
+`ACTIONLINT_VERSION`/`ACTIONLINT_SHA256` and
+`GITLEAKS_VERSION`/`GITLEAKS_SHA256` for the downloaded release binaries. To
+bump a binary, take the new SHA-256 from that release's `checksums.txt` (or
+equivalent) file. `codeql.yml` pins `SETUPTOOLS_VERSION` and `CFFI_VERSION`
+(matching `uv.lock`'s resolved `cffi` for Python 3.10+) for the manual
+c-cpp build venv. Run the local commands in
+[testing.md](testing.md#security-checks-locally) after any bump.
+
+### Suppressions
+
+A zizmor finding is suppressed with an inline `# zizmor: ignore[rule]`
+comment placed inside the flagged span, with the reason in the same comment.
+A Bandit finding is suppressed with `# nosec BXXX` and a reason on the
+preceding line. Current suppressions:
+
+- `build.yml`'s `publish` and `back-merge` jobs and
+  `check-upstream.yml`'s `prepare-and-dispatch` job: `persist-credentials` is
+  left at its default `true` because each pushes with the job token
+  (`artipacked`).
+- `mcurl/gen.py`'s preprocessor call (`subprocess.run(..., shell=True)`):
+  `nosec B602`. The command is built entirely from hardcoded gcc flags and
+  build-time header paths (never user input), and one hardcoded define
+  (`"-D__attribute__(x)="`) is shell-quoted on purpose, so switching away from
+  `shell=True` would require also rewriting that quoting — left as is and
+  documented rather than risked without Windows/macOS coverage of the change.
+
+### Reviewing outside pull requests
+
+The reviewer of an outside pull request reads every `security.yml` job result
+and every CodeQL alert for it and addresses or justifies each finding before
+integrating. A failing security check blocks integration.
+
+### Repository settings
+
+Secret scanning with push protection, Dependabot alerts, private
+vulnerability reporting, code scanning default setup, and branch protection
+are enabled by the repository owner in the GitHub settings, not by a
+workflow. Read read-only via `gh api repos/genotrance/mcurl`,
+`gh api repos/genotrance/mcurl/code-scanning/default-setup`,
+`gh api repos/genotrance/mcurl/private-vulnerability-reporting`,
+`gh api repos/genotrance/mcurl/vulnerability-alerts`, and
+`gh api repos/genotrance/mcurl/branches/{devel,main}/protection` (2026-11-18):
+
+- `security_and_analysis`: secret scanning, secret scanning push protection
+  and Dependabot security updates are all currently **disabled**.
+  (Dependabot security updates should stay off even after secret scanning is
+  turned on: `dependabot.yml`'s monthly version updates already propose fixes
+  through the normal review path, same choice as px and quickjs-ng.)
+- Code scanning default setup: `not-configured` (good — required before
+  `codeql.yml` can use advanced setup).
+- Private vulnerability reporting: disabled (`{"enabled": false}`).
+- Dependabot alerts (`vulnerability-alerts`): disabled (404 = disabled, per
+  the GitHub API's documented convention for this endpoint).
+- Branch protection on `devel` (the default branch) and `main`: neither is
+  protected (`404 Branch not protected` for both).
+
+Exact write commands for an operator to apply after this result is reviewed
+(none were run by this task):
+
+```sh
+# Enable Dependabot alerts
+gh api -X PUT repos/genotrance/mcurl/vulnerability-alerts
+
+# Enable private vulnerability reporting
+gh api -X PUT repos/genotrance/mcurl/private-vulnerability-reporting
+
+# Protect devel and main: block force-push and branch deletion only.
+# No required status checks: build.yml's publish/back-merge jobs and
+# check-upstream.yml's prepare-and-dispatch job push directly to devel and
+# main with GITHUB_TOKEN, and a required check would block those pushes
+# unless the bot's push were separately exempted.
+for branch in devel main; do
+  gh api -X PUT "repos/genotrance/mcurl/branches/$branch/protection" --input - <<JSON
+{
+  "required_status_checks": null,
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+done
+```
 
 ---
 

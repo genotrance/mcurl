@@ -26,6 +26,18 @@
 - Do not add CI, build system, tooling, test infrastructure, or other internal changes to the changelog.
 - Keep entries concise and focused on what changed for users of the library.
 
+## Security
+
+- `security.yml` (zizmor, actionlint, dependency review, gitleaks, Bandit)
+  and `codeql.yml` (CodeQL `security-extended`, advanced setup) run on every
+  pull request and push to `devel`/`main`; see
+  [docs/ci.md](docs/ci.md#security-checks) for each job and
+  [docs/testing.md](docs/testing.md#security-checks-locally) to run them
+  locally.
+- The reviewer of any outside pull request reads every `security.yml` job
+  result and every CodeQL alert for it, and addresses or justifies each
+  finding before integrating. A failing security check blocks integration.
+
 ## Scope discipline
 
 - Do not remove any capability or support unless explicitly asked by the user.
