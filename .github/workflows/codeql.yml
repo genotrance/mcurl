@@ -63,7 +63,7 @@ jobs:
         if: matrix.build-mode == 'manual'
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet "setuptools==$SETUPTOOLS_VERSION" "cffi==$CFFI_VERSION"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet "setuptools==$SETUPTOOLS_VERSION" "cffi==$CFFI_VERSION" "jbb>=0.1.6"
           "$RUNNER_TEMP/venv/bin/python" .github/codeql/build_ccpp.py
 
       - name: Analyze with CodeQL
