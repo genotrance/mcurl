@@ -154,7 +154,9 @@ jobs:
       - name: Run tests
         env:
           PYTEST_ARGS: ${{ needs.plan.outputs.pytest_args }}
-        run: uv run --locked python -m pytest tests $PYTEST_ARGS --cov --cov-config=pyproject.toml --cov-report=xml
+        run: |
+          read -r -a pytest_args <<< "$PYTEST_ARGS"
+          uv run --locked python -m pytest tests "${pytest_args[@]}" --cov --cov-config=pyproject.toml --cov-report=xml
 
   tests-windows:
     runs-on: windows-latest

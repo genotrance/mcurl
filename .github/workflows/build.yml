@@ -74,9 +74,11 @@ jobs:
             PUBLISH="true"
           fi
 
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "publish=$PUBLISH" >> $GITHUB_OUTPUT
-          echo "dry_run=$INPUT_DRY_RUN" >> $GITHUB_OUTPUT
+          {
+            echo "version=$VERSION"
+            echo "publish=$PUBLISH"
+            echo "dry_run=$INPUT_DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION, Publish: $PUBLISH, dry run: $INPUT_DRY_RUN"
 
   build-sdist:
